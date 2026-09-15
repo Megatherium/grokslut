@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>grokslut</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 900px; margin: 3rem auto; padding: 0 1rem; background: #101218; color: #eceef4; }
+    button { cursor: pointer; background: #6750a4; color: #fff; border: 0; border-radius: .4rem; padding: .55rem .8rem; font: inherit; }
+    button.alt { background: #30333d; }
+    section { background: #1c1f27; border-radius: .75rem; padding: 1rem 1.25rem; margin: 1rem 0; }
+    details { padding: .6rem; border-bottom: 1px solid #343843; }
+    .chat { display: flex; gap: .6rem; padding: .45rem; }
+    .chat label { flex: 1; cursor: pointer; }
+    .muted { color: #b6bac7; font-size: .9rem; }
+    .warning { color: #ffcc80; }
+    .hidden { display: none; }
+    a { color: #cbb9ff; }
+  </style>
+  <body>
+    <h1>grokslut</h1>
+    <p class="muted">Local-only Grok conversation export.</p>
+    <section>
+      <h2>Browser session</h2>
+      <p id="status">Checking the shared session…</p>
+      <div id="connect" class="hidden">
+        <p>Sign in normally at <a href="https://grok.com/" target="_blank">Grok</a>, then click <strong>Sync Grok session</strong> in the unpacked grokslut extension.</p>
+      </div>
+      <button class="alt hidden" id="logout">Clear local session</button>
+    </section>
+    <section id="chats" class="hidden">
+      <h2>Conversations</h2>
+      <p><button id="refresh">Refresh</button> <span id="selection" class="muted"></span></p>
+      <div id="tree"></div>
+    </section>
+    <section id="export" class="hidden">
+      <h2>Download selected conversations</h2>
+      <p id="selected"></p>
+      <button data-format="markdown">Markdown + media</button>
+      <button data-format="json">JSON</button>
+      <button data-format="zip">ZIP bundle</button>
+      <div id="result"></div>
+    </section>
+    <script>
+      const $ = (selector) => document.querySelector(selector);
+      const selected = new Set();
+      async function api(path, options) {
+        const response = await fetch(path, options);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error);
+        return data;
+      }
+      function updateSelection() {
+        const count = selected.size;
+        $("#selection").textContent = count ? count + " selected" : "";
+        $("#selected").textContent = count + " conversation" + (count === 1 ? "" : "s") + " selected.";
+        $("#export").classList.toggle("hidden", !count);
+      }
+      function conversationRow(conversation) {
+        const row = document.createElement("div");
+        row.className = "chat";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.addEventListener("change", () => {
+          box.checked ? selected.add(conversation.id) : selected.delete(conversation.id);
+          updateSelection();
+        });
+        const label = document.createElement("label");
+        label.textContent = conversation.title || "Untitled conversation";
+        label.addEventListener("click", () => { box.checked = !box.checked; box.dispatchEvent(new Event("change")); });
+        const date = document.createElement("span");
+        date.className = "muted";
+        date.textContent = conversation.updatedAt || "";
+        row.append(box, label, date);
+        return row;
+      }
+      async function loadConversations() {
+        const groups = await api("/api/conversations");
+        const tree = $("#tree");
+        tree.replaceChildren();
+        for (const group of groups) {
+          const branch = document.createElement("details");
+          branch.open = true;
+          const title = document.createElement("summary");
+          title.textContent = group.title + " (" + group.conversations.length + ")";
+          branch.append(title, ...group.conversations.map(conversationRow));
+          tree.append(branch);
+        }
+        $("#chats").classList.remove("hidden");
+      }
+      async function loadStatus() {
+        const state = await api("/api/status");
+        $("#status").textContent = state.authenticated ? "Connected to your shared local Grok session." : "No Grok session is connected.";
+        $("#connect").classList.toggle("hidden", state.authenticated);
+        $("#logout").classList.toggle("hidden", !state.authenticated);
+        if (state.authenticated) await loadConversations();
+      }
+      $("#logout").addEventListener("click", async () => {
+        await api("/api/logout", { method: "POST" });
+        selected.clear(); updateSelection(); $("#chats").classList.add("hidden"); await loadStatus();
+      });
+      $("#refresh").addEventListener("click", () => loadConversations().catch((error) => alert(error.message)));
+      document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
+        try {
+          const result = await api("/api/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], format: button.dataset.format }) });
+          const output = $("#result"); output.replaceChildren();
+          for (const path of result.paths) {
+            const link = document.createElement("a");
+            link.href = "/files/" + path.split("/").map(encodeURIComponent).join("/");
+            link.textContent = "Download " + path; link.style.display = "block"; output.append(link);
+          }
+          for (const warning of result.warnings) { const line = document.createElement("p"); line.className = "warning"; line.textContent = warning; output.append(line); }
+        } catch (error) { alert(error.message); }
+      }));
+      loadStatus().catch((error) => { $("#status").textContent = error.message; });
+    </script>
+  </body>
+</html>
