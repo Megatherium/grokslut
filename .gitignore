@@ -2,3 +2,7 @@ exports/
 *.zip
 session*.json
 .gocache/
+android/app/build/
+android/app/libs/*.aar
+.gradle/
+local.properties

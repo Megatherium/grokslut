@@ -35,17 +35,23 @@ func SessionFromCookies(cookiesJSON string) error {
 func SessionClear()        { state.Lock(); defer state.Unlock(); state.client = nil }
 func SessionIsValid() bool { state.RLock(); defer state.RUnlock(); return state.client != nil }
 
-func ListConversations(pageSize int, cursor string) (string, string, error) {
+// ListConversations returns a single JSON envelope because gomobile only binds
+// one value plus an error reliably across Java/Kotlin. The envelope contains
+// both `conversations` and `nextCursor`.
+func ListConversations(pageSize int, cursor string) (string, error) {
 	client, err := currentClient()
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	result, err := client.ListConversations(pageSize, cursor)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	data, err := json.Marshal(result.Conversations)
-	return string(data), result.NextCursor, err
+	data, err := json.Marshal(struct {
+		Conversations []grok.ConversationSummary `json:"conversations"`
+		NextCursor    string                     `json:"nextCursor"`
+	}{result.Conversations, result.NextCursor})
+	return string(data), err
 }
 
 func LoadConversation(id string) (string, error) {
