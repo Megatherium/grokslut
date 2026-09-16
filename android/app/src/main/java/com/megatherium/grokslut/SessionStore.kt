@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -28,11 +29,11 @@ internal class SessionStore(context: Context) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val packed = cipher.iv + cipher.doFinal(sessionJson.toByteArray(Charsets.UTF_8))
-        preferences.edit().putString(CIPHERTEXT, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
+        preferences.edit { putString(CIPHERTEXT, Base64.encodeToString(packed, Base64.NO_WRAP)) }
     }
 
     fun clear() {
-        preferences.edit().clear().apply()
+        preferences.edit { clear() }
         val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         if (store.containsAlias(KEY_ALIAS)) store.deleteEntry(KEY_ALIAS)
     }

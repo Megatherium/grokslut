@@ -28,13 +28,16 @@ Consequently, direct WebView sign-in is provider-dependent. Grok/X login or sess
 
 ## Build
 
-Install Go 1.22+, JDK 17, an Android SDK/NDK, and Gradle 8.11.1 or later. Then set `ANDROID_HOME` and `JAVA_HOME` and run:
+The repository pins its command-line toolchain with mise and includes a Gradle wrapper:
 
 ```sh
-scripts/build-android.sh
+mise install
+mise run android
 ```
 
-The script installs `gomobile`, produces `android/app/libs/grokcore.aar`, and assembles a debug APK. The AAR is generated and intentionally not committed.
+Without mise, install Go 1.22+, JDK 17, Android platform 35, build tools 35.0.0, and NDK 27.2.12479018. Set `ANDROID_HOME` and `JAVA_HOME`, then run `scripts/build-android.sh`.
+
+The script installs the pinned `gomobile`, produces `android/app/libs/grokcore.aar`, and assembles a debug APK with `./gradlew`. The AAR is generated and intentionally not committed.
 
 ## Real-device gate
 

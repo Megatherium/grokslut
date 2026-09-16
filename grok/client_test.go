@@ -69,6 +69,61 @@ func TestAuthFailureIsTyped(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotLeakSessionHeadersAcrossOriginsOrRedirects(t *testing.T) {
+	var received []string
+	external := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		received = append(received, request.Header.Get("X-Challenge"))
+		writer.Write([]byte("media"))
+	}))
+	defer external.Close()
+
+	base := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/redirect" {
+			http.Redirect(writer, request, external.URL+"/asset", http.StatusFound)
+			return
+		}
+		writer.Write([]byte("media"))
+	}))
+	defer base.Close()
+
+	parsed, err := url.Parse(base.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := grok.NewClient(auth.Session{
+		Cookies: []auth.Cookie{{Name: "sso", Value: "test", Domain: parsed.Hostname()}},
+		Headers: map[string]string{"X-Challenge": "secret", "Authorization": "must-not-be-forwarded"},
+	}, base.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Headers.Get("Authorization") != "" {
+		t.Fatal("non-browser session header was accepted")
+	}
+
+	for _, target := range []string{external.URL + "/direct", base.URL + "/redirect"} {
+		response, err := client.GetMedia(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+	}
+	for _, value := range received {
+		if value != "" {
+			t.Fatalf("session header leaked cross-origin: %q", value)
+		}
+	}
+}
+
+func TestClientRejectsCookieForUnrelatedDomain(t *testing.T) {
+	_, err := grok.NewClient(auth.Session{
+		Cookies: []auth.Cookie{{Name: "sso", Value: "test", Domain: ".example.invalid"}},
+	}, "https://grok.com")
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected domain mismatch, got %v", err)
+	}
+}
+
 func fixtureClient(t *testing.T, rawURL string) *grok.Client {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)

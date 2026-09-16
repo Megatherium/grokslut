@@ -39,11 +39,14 @@ The Android client is feasible on an unrooted device, with an important limit: G
 
 Google's OAuth policy rejects embedded user-agents, so **Continue with Google is not promised to work**. Direct Grok/X sign-in can work when Grok permits it. A session JSON produced by the desktop bridge can also be imported through Android's document picker; root access is not required.
 
-Build requirements are Go 1.22+, JDK 17, an Android SDK/NDK, and Gradle 8.11.1+:
+Build requirements are Go 1.22+, JDK 17, and an Android SDK/NDK. The repository includes a pinned Gradle wrapper. With [mise](https://mise.jdx.dev/) installed, provision the toolchain and build with:
 
 ```sh
-scripts/build-android.sh
+mise install
+mise run android
 ```
+
+Without mise, set `ANDROID_HOME` and `JAVA_HOME`, install Android platform 35, build tools 35.0.0 and NDK 27.2.12479018, then run `scripts/build-android.sh`.
 
 The script binds `./mobile` into an AAR and then builds the Kotlin/Compose APK. See [android/README.md](android/README.md) for the security boundary and device test plan.
 

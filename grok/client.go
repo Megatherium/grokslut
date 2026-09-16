@@ -43,19 +43,31 @@ func NewClient(session auth.Session, baseURL string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" {
+		return nil, fmt.Errorf("base URL must be HTTP(S) with a host")
+	}
+	headers := make(http.Header, len(session.Headers))
+	for key, value := range session.Headers {
+		if allowedSessionHeader(key) {
+			headers.Set(key, value)
+		}
+	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
-	httpClient := &http.Client{Jar: jar, Timeout: 45 * time.Second}
+	httpClient := &http.Client{
+		Jar:     jar,
+		Timeout: 45 * time.Second,
+		CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+			if !sameOrigin(request.URL, base) {
+				stripSessionHeaders(request.Header, headers)
+			}
+			return nil
+		},
+	}
 	if err := session.Apply(httpClient, base.String()); err != nil {
 		return nil, err
-	}
-	headers := make(http.Header, len(session.Headers))
-	for key, value := range session.Headers {
-		if !strings.EqualFold(key, "cookie") && !strings.EqualFold(key, "host") {
-			headers.Set(key, value)
-		}
 	}
 	return &Client{BaseURL: base, HTTP: httpClient, Headers: headers, Retries: 3}, nil
 }
@@ -125,12 +137,18 @@ func (c *Client) LoadConversation(id string) (Thread, error) {
 
 // GetMedia downloads an asset with the same session and browser headers.
 func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, assetURL, nil)
+	asset, err := url.Parse(assetURL)
+	if err != nil || (asset.Scheme != "http" && asset.Scheme != "https") || asset.Hostname() == "" {
+		return nil, fmt.Errorf("invalid media URL")
+	}
+	req, err := http.NewRequest(http.MethodGet, asset.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-	for key, values := range c.Headers {
-		req.Header[key] = append([]string(nil), values...)
+	if sameOrigin(asset, c.BaseURL) {
+		for key, values := range c.Headers {
+			req.Header[key] = append([]string(nil), values...)
+		}
 	}
 	response, err := c.HTTP.Do(req)
 	if err != nil {
@@ -145,6 +163,33 @@ func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
 		return nil, &HTTPError{Status: response.StatusCode}
 	}
 	return response, nil
+}
+
+func allowedSessionHeader(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, "x-") || lower == "user-agent" || lower == "accept-language"
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectivePort(left) == effectivePort(right)
+}
+
+func effectivePort(value *url.URL) string {
+	if value.Port() != "" {
+		return value.Port()
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+func stripSessionHeaders(destination, session http.Header) {
+	for name := range session {
+		destination.Del(name)
+	}
 }
 
 func (c *Client) request(method, path string, body []byte) ([]byte, error) {

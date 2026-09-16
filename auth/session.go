@@ -74,14 +74,25 @@ func (s Session) Apply(client *http.Client, baseURL string) error {
 	if err != nil {
 		return err
 	}
+	baseHost := strings.ToLower(base.Hostname())
+	if baseHost == "" {
+		return fmt.Errorf("base URL needs a host")
+	}
 	for _, cookie := range s.Cookies {
 		domain := strings.TrimPrefix(cookie.Domain, ".")
+		cookieHost := strings.ToLower(domain)
+		if cookieHost == "" {
+			cookieHost = baseHost
+		}
+		if host, _, found := strings.Cut(cookieHost, ":"); found {
+			cookieHost = host
+		}
+		if cookieHost != baseHost && !strings.HasSuffix(baseHost, "."+cookieHost) {
+			return fmt.Errorf("cookie domain %q does not match %s", cookie.Domain, baseHost)
+		}
 		target := *base
 		if domain != "" {
 			target.Host = domain
-			if strings.Contains(domain, ":") {
-				target.Host = domain
-			}
 		}
 		client.Jar.SetCookies(&target, []*http.Cookie{{Name: cookie.Name, Value: cookie.Value, Domain: cookie.Domain, Path: "/", Secure: target.Scheme == "https"}})
 	}
