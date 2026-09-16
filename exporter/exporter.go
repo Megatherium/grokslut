@@ -1,4 +1,4 @@
-// Package exporter writes Grok threads as Markdown, JSON, or a ZIP archive.
+// Package exporter writes provider threads as Markdown, normalized JSON, raw JSON, or ZIP.
 package exporter
 
 import (
@@ -26,6 +26,7 @@ type Format string
 const (
 	Markdown Format = "markdown"
 	JSON     Format = "json"
+	RawJSON  Format = "raw-json"
 	ZIP      Format = "zip"
 )
 
@@ -52,8 +53,8 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 	if len(ids) == 0 {
 		return Result{}, fmt.Errorf("select at least one conversation")
 	}
-	if format != Markdown && format != JSON && format != ZIP {
-		return Result{}, fmt.Errorf("format must be markdown, json, or zip")
+	if format != Markdown && format != JSON && format != RawJSON && format != ZIP {
+		return Result{}, fmt.Errorf("format must be markdown, json, raw-json, or zip")
 	}
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return Result{}, err
@@ -78,7 +79,7 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 		if err != nil {
 			return Result{}, err
 		}
-		files, warnings, err := e.writeDirectory(thread, directory, format == Markdown, format == JSON)
+		files, warnings, err := e.writeDirectory(thread, directory, format)
 		if err != nil {
 			return Result{}, err
 		}
@@ -105,7 +106,7 @@ func (e Exporter) writeZIP(threads []grok.Thread, outDir string, progress Progre
 		if err := zipText(zipWriter, prefix+SafeName(thread.Conversation.Title)+".md", RenderMarkdown(thread, media.replacements)); err != nil {
 			return Result{}, err
 		}
-		if err := zipJSON(zipWriter, prefix+SafeName(thread.Conversation.Title)+".json", thread); err != nil {
+		if err := zipJSON(zipWriter, prefix+SafeName(thread.Conversation.Title)+".json", thread, false); err != nil {
 			return Result{}, err
 		}
 		for _, item := range media.items {
@@ -125,20 +126,24 @@ func (e Exporter) writeZIP(threads []grok.Thread, outDir string, progress Progre
 	return result, nil
 }
 
-func (e Exporter) writeDirectory(thread grok.Thread, directory string, markdown, jsonOut bool) ([]string, []string, error) {
+func (e Exporter) writeDirectory(thread grok.Thread, directory string, format Format) ([]string, []string, error) {
 	media, warnings := e.downloadMedia(thread.Responses)
 	var paths []string
 	base := SafeName(thread.Conversation.Title)
-	if markdown {
+	if format == Markdown {
 		target := filepath.Join(directory, base+".md")
 		if err := os.WriteFile(target, []byte(RenderMarkdown(thread, media.replacements)), 0644); err != nil {
 			return nil, nil, err
 		}
 		paths = append(paths, target)
 	}
-	if jsonOut {
-		target := filepath.Join(directory, base+".json")
-		if err := writeThreadJSON(target, thread); err != nil {
+	if format == JSON || format == RawJSON {
+		suffix := ".json"
+		if format == RawJSON {
+			suffix = ".raw.json"
+		}
+		target := filepath.Join(directory, base+suffix)
+		if err := writeThreadJSON(target, thread, format == RawJSON); err != nil {
 			return nil, nil, err
 		}
 		paths = append(paths, target)
@@ -313,9 +318,9 @@ func defaultString(value, fallback string) string {
 }
 func quote(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }
 
-func writeThreadJSON(target string, thread grok.Thread) error {
+func writeThreadJSON(target string, thread grok.Thread, raw bool) error {
 	var buffer bytes.Buffer
-	if err := encodeThread(&buffer, thread); err != nil {
+	if err := encodeThread(&buffer, thread, raw); err != nil {
 		return err
 	}
 	return os.WriteFile(target, buffer.Bytes(), 0644)
@@ -323,9 +328,9 @@ func writeThreadJSON(target string, thread grok.Thread) error {
 func zipText(writer *zip.Writer, name, value string) error {
 	return zipBytes(writer, name, []byte(value))
 }
-func zipJSON(writer *zip.Writer, name string, thread grok.Thread) error {
+func zipJSON(writer *zip.Writer, name string, thread grok.Thread, raw bool) error {
 	var buffer bytes.Buffer
-	if err := encodeThread(&buffer, thread); err != nil {
+	if err := encodeThread(&buffer, thread, raw); err != nil {
 		return err
 	}
 	return zipBytes(writer, name, buffer.Bytes())
@@ -338,7 +343,10 @@ func zipBytes(writer *zip.Writer, name string, data []byte) error {
 	_, err = destination.Write(data)
 	return err
 }
-func encodeThread(writer io.Writer, thread grok.Thread) error {
+func encodeThread(writer io.Writer, thread grok.Thread, raw bool) error {
+	if !raw {
+		return encodeNormalizedThread(writer, thread)
+	}
 	conversation := thread.Conversation.Raw
 	if len(conversation) == 0 {
 		conversation, _ = json.Marshal(thread.Conversation)
@@ -362,6 +370,65 @@ func encodeThread(writer io.Writer, thread grok.Thread) error {
 	}
 	_, err = writer.Write([]byte("}\n"))
 	return err
+}
+
+type normalizedThread struct {
+	Conversation grok.ConversationSummary `json:"conversation"`
+	Responses    []normalizedResponse     `json:"responses"`
+}
+
+type normalizedResponse struct {
+	Provider         string   `json:"provider"`
+	ResponseID       string   `json:"responseId"`
+	ParentResponseID string   `json:"parentResponseId,omitempty"`
+	Sender           string   `json:"sender"`
+	Message          string   `json:"message"`
+	CreateTime       string   `json:"createTime,omitempty"`
+	AssetURLs        []string `json:"assetUrls,omitempty"`
+}
+
+func encodeNormalizedThread(writer io.Writer, thread grok.Thread) error {
+	provider := thread.Conversation.Provider
+	if provider == "" {
+		provider = "grok"
+	}
+	conversation := thread.Conversation
+	conversation.Provider = provider
+	responses := append([]json.RawMessage(nil), thread.Responses...)
+	sort.SliceStable(responses, func(i, j int) bool { return responseTime(responses[i]) < responseTime(responses[j]) })
+	normalized := normalizedThread{Conversation: conversation, Responses: make([]normalizedResponse, 0, len(responses))}
+	for _, raw := range responses {
+		author, id, parent, message := responseFields(raw)
+		responseProvider := provider
+		var object map[string]any
+		if json.Unmarshal(raw, &object) == nil {
+			responseProvider = defaultString(stringAt(object, "provider"), provider)
+		}
+		normalized.Responses = append(normalized.Responses, normalizedResponse{
+			Provider:         responseProvider,
+			ResponseID:       id,
+			ParentResponseID: parent,
+			Sender:           strings.ToLower(author),
+			Message:          message,
+			CreateTime:       responseTime(raw),
+			AssetURLs:        uniqueStrings(MediaURLs(raw)),
+		})
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(normalized)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 func SafeName(value string) string {
 	value = strings.ReplaceAll(value, "/", " ")

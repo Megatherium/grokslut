@@ -2,7 +2,7 @@
 
 Personal Grok and Gemini conversation export in Go: reusable provider clients, a CLI, a loopback web UI, a small Chrome session bridge, and a thin Kotlin Android client for Grok.
 
-The exporter lists conversations, exhausts each provider's progressive-history pagination, preserves raw response data, downloads media, and writes Markdown, JSON, or ZIP. It does not send messages or use the unrelated xAI or Google model APIs.
+The exporter lists conversations, exhausts each provider's progressive-history pagination, preserves raw response data, downloads media, and writes Markdown, normalized JSON, raw archival JSON, or ZIP. It does not send messages or use the unrelated xAI or Google model APIs.
 
 ## Browser workflow
 
@@ -15,9 +15,9 @@ The exporter lists conversations, exhausts each provider's progressive-history p
 2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the repository's `chrome-extension` directory.
 3. Open `https://grok.com` and/or `https://gemini.google.com`, sign in normally, and let each conversation list load once.
 4. Open the **grokslut session bridge** extension and sync each provider you want to export.
-5. Open `http://127.0.0.1:8787`. Choose Grok or Gemini, filter and select chats, then choose Markdown + media, JSON, or ZIP. Large exports show live message-loading progress.
+5. Open `http://127.0.0.1:8787`. Choose Grok or Gemini, filter and select chats, then choose Markdown + media, JSON, Raw JSON, or ZIP. Large exports show live message-loading progress. JSON uses a compact provider-neutral schema; Raw JSON retains the providers' undocumented payloads for archival/debugging.
 
-The exporter does not depend on either site's progressively loaded page UI. For Grok it hydrates the complete response index and follows unresolved parent links. For Gemini it walks every conversation-list and turn cursor, normalizes both human and assistant text, and retains the raw positional RPC records in JSON.
+The exporter does not depend on either site's progressively loaded page UI. For Grok it hydrates the complete response index and follows unresolved parent links. For Gemini it walks every conversation-list and turn cursor, normalizes both human and assistant text, and retains the raw positional RPC records in Raw JSON.
 
 The extension reads only cookies applicable to the selected first-party site, observes only Grok history or Gemini batched-RPC requests, and sends the resulting session envelope only to the loopback exporter. Transient headers are kept in Chrome's in-memory session storage and cleared after a successful sync. Grok and Gemini sessions are stored separately with owner-only permissions. No credential is logged or sent to another host.
 
@@ -35,6 +35,7 @@ go run ./cmd/grokslut export --ids chat-id-1,chat-id-2 --format zip --out export
 go run ./cmd/grokslut verify --provider gemini
 go run ./cmd/grokslut list --provider gemini --all
 go run ./cmd/grokslut export --provider gemini --ids c_example --format zip --out exports
+go run ./cmd/grokslut export --provider gemini --ids c_example --format raw-json --out exports
 ```
 
 Pass `--session path/to/session.json` only when an explicit alternate store is needed. Defaults are `session.json` for Grok and `session-gemini.json` for Gemini under the grokslut user configuration directory.
