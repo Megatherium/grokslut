@@ -29,6 +29,7 @@ const (
 )
 
 var ErrAuthExpired = grok.ErrAuthExpired
+var errInvalidBatchPayload = errors.New("invalid Gemini batch payload")
 
 type Client struct {
 	BaseURL *url.URL
@@ -241,10 +242,22 @@ func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
 }
 
 func (c *Client) call(rpc string, args any, sourcePath string) (json.RawMessage, error) {
-	tokens, err := c.pageTokens()
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 2; attempt++ {
+		tokens, err := c.pageTokens()
+		if err != nil {
+			return nil, err
+		}
+		payload, err := c.callWithTokens(rpc, args, sourcePath, tokens)
+		if attempt == 0 && errors.Is(err, errInvalidBatchPayload) {
+			c.invalidatePageTokens(tokens)
+			continue
+		}
+		return payload, err
 	}
+	return nil, errInvalidBatchPayload
+}
+
+func (c *Client) callWithTokens(rpc string, args any, sourcePath string, tokens pageTokens) (json.RawMessage, error) {
 	inner, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -297,6 +310,14 @@ func (c *Client) call(rpc string, args any, sourcePath string) (json.RawMessage,
 		return nil, err
 	}
 	return payload, nil
+}
+
+func (c *Client) invalidatePageTokens(used pageTokens) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tokens == used {
+		c.tokens = pageTokens{}
+	}
 }
 
 func (c *Client) pageTokens() (pageTokens, error) {
@@ -370,7 +391,7 @@ func decodeBatchResponse(body []byte, rpc string) (json.RawMessage, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("Gemini %s response did not contain a valid payload", rpc)
+	return nil, fmt.Errorf("%w: Gemini %s response did not contain a valid payload", errInvalidBatchPayload, rpc)
 }
 
 func decodeConversationList(raw json.RawMessage) (grok.ListResult, error) {

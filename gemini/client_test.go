@@ -86,6 +86,42 @@ func TestMissingGeminiBootstrapTokensIsAuthFailure(t *testing.T) {
 	}
 }
 
+func TestInvalidBatchEnvelopeRefreshesBootstrapTokensAndRetries(t *testing.T) {
+	bootstrapCalls := 0
+	batchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/app":
+			bootstrapCalls++
+			fmt.Fprintf(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf-%d","cfb2h":"build","FdrFJe":"sid"};</script>`, bootstrapCalls)
+		case "/_/BardChatUi/data/batchexecute":
+			batchCalls++
+			if err := request.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if request.Form.Get("at") == "csrf-1" {
+				fmt.Fprint(writer, ")]}'\n\n17\n[[\"er\",null,401]]\n")
+				return
+			}
+			batchResponse(writer, "MaZiqc", listPayload("", "fresh", "Fresh tokens"))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	result, err := fixtureClient(t, server.URL).ListConversations(1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapCalls != 2 || batchCalls != 2 {
+		t.Fatalf("bootstrap calls = %d, batch calls = %d; want 2 each", bootstrapCalls, batchCalls)
+	}
+	if len(result.Conversations) != 1 || result.Conversations[0].ID != "fresh" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
 func TestListAllConversationsExhaustsPinnedAndRegularCursors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/app" {
