@@ -7,10 +7,16 @@
     body { font: 16px system-ui, sans-serif; max-width: 900px; margin: 3rem auto; padding: 0 1rem; background: #101218; color: #eceef4; }
     button { cursor: pointer; background: #6750a4; color: #fff; border: 0; border-radius: .4rem; padding: .55rem .8rem; font: inherit; }
     button.alt { background: #30333d; }
+    input[type="search"] { flex: 1; min-width: 12rem; background: #101218; color: #eceef4; border: 1px solid #4a4f5d; border-radius: .4rem; padding: .55rem .7rem; font: inherit; }
     section { background: #1c1f27; border-radius: .75rem; padding: 1rem 1.25rem; margin: 1rem 0; }
     details { padding: .6rem; border-bottom: 1px solid #343843; }
     .chat { display: flex; gap: .6rem; padding: .45rem; }
     .chat label { flex: 1; cursor: pointer; }
+    .conversation-toolbar { position: sticky; top: .5rem; z-index: 10; background: #262a34; border: 1px solid #3b404d; border-radius: .65rem; padding: .75rem; margin-bottom: .75rem; box-shadow: 0 .4rem 1.2rem #0008; }
+    .filter-row, .export-row { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+    #export { border-top: 1px solid #3b404d; margin-top: .75rem; padding-top: .75rem; }
+    #selected { margin-right: auto; }
+    #result { max-height: 8rem; overflow: auto; margin-top: .5rem; }
     .muted { color: #b6bac7; font-size: .9rem; }
     .warning { color: #ffcc80; }
     .hidden { display: none; }
@@ -30,20 +36,27 @@
     </section>
     <section id="chats" class="hidden">
       <h2>Conversations</h2>
-      <p><button id="refresh">Refresh</button> <span id="selection" class="muted"></span></p>
-      <div id="tree"></div>
-    </section>
-    <section id="export" class="hidden">
-      <h2>Download selected conversations</h2>
-      <p id="selected"></p>
-      <button data-format="markdown">Markdown + media</button>
-      <button data-format="json">JSON</button>
-      <button data-format="zip">ZIP bundle</button>
-      <div id="progress" class="hidden">
-        <p id="progress-label" class="muted">Preparing export…</p>
-        <progress id="export-progress"></progress>
+      <div class="conversation-toolbar">
+        <div class="filter-row">
+          <input id="filter" type="search" placeholder="Filter conversations or projects…" aria-label="Filter conversations">
+          <button class="alt" id="refresh">Refresh</button>
+          <span id="filter-count" class="muted"></span>
+        </div>
+        <div id="export" class="hidden">
+          <div class="export-row">
+            <span id="selected"></span>
+            <button data-format="markdown">Markdown + media</button>
+            <button data-format="json">JSON</button>
+            <button data-format="zip">ZIP bundle</button>
+          </div>
+          <div id="progress" class="hidden">
+            <p id="progress-label" class="muted">Preparing export…</p>
+            <progress id="export-progress"></progress>
+          </div>
+          <div id="result"></div>
+        </div>
       </div>
-      <div id="result"></div>
+      <div id="tree"></div>
     </section>
     <script>
       const $ = (selector) => document.querySelector(selector);
@@ -56,15 +69,16 @@
       }
       function updateSelection() {
         const count = selected.size;
-        $("#selection").textContent = count ? count + " selected" : "";
         $("#selected").textContent = count + " conversation" + (count === 1 ? "" : "s") + " selected.";
         $("#export").classList.toggle("hidden", !count);
       }
-      function conversationRow(conversation) {
+      function conversationRow(conversation, projectTitle) {
         const row = document.createElement("div");
         row.className = "chat";
+        row.dataset.search = [conversation.title, conversation.preview, conversation.id, projectTitle].filter(Boolean).join(" ").toLocaleLowerCase();
         const box = document.createElement("input");
         box.type = "checkbox";
+        box.checked = selected.has(conversation.id);
         box.addEventListener("change", () => {
           box.checked ? selected.add(conversation.id) : selected.delete(conversation.id);
           updateSelection();
@@ -78,6 +92,24 @@
         row.append(box, label, date);
         return row;
       }
+      function applyFilter() {
+        const term = $("#filter").value.trim().toLocaleLowerCase();
+        let shown = 0;
+        let total = 0;
+        document.querySelectorAll("#tree details").forEach((branch) => {
+          const projectMatches = branch.querySelector("summary").textContent.toLocaleLowerCase().includes(term);
+          let branchShown = 0;
+          branch.querySelectorAll(".chat").forEach((row) => {
+            const matches = !term || projectMatches || row.dataset.search.includes(term);
+            row.classList.toggle("hidden", !matches);
+            total++;
+            if (matches) { shown++; branchShown++; }
+          });
+          branch.classList.toggle("hidden", branchShown === 0);
+          if (term && branchShown) branch.open = true;
+        });
+        $("#filter-count").textContent = term ? shown + " of " + total : total + " conversations";
+      }
       async function loadConversations() {
         const groups = await api("/api/conversations");
         const tree = $("#tree");
@@ -87,9 +119,10 @@
           branch.open = true;
           const title = document.createElement("summary");
           title.textContent = group.title + " (" + group.conversations.length + ")";
-          branch.append(title, ...group.conversations.map(conversationRow));
+          branch.append(title, ...group.conversations.map((conversation) => conversationRow(conversation, group.title)));
           tree.append(branch);
         }
+        applyFilter();
         $("#chats").classList.remove("hidden");
       }
       async function loadStatus() {
@@ -138,6 +171,7 @@
         await api("/api/logout", { method: "POST" });
         selected.clear(); updateSelection(); $("#chats").classList.add("hidden"); await loadStatus();
       });
+      $("#filter").addEventListener("input", applyFilter);
       $("#refresh").addEventListener("click", () => loadConversations().catch((error) => alert(error.message)));
       document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
         const buttons = [...document.querySelectorAll("[data-format]")];
