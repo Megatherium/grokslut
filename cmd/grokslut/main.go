@@ -41,7 +41,7 @@ func run(args []string) error {
 	cursor := flags.String("cursor", "", "pagination cursor")
 	all := flags.Bool("all", false, "fetch every page")
 	ids := flags.String("ids", "", "comma-separated conversation IDs")
-	format := flags.String("format", "zip", "markdown, json, or zip")
+	format := flags.String("format", "zip", "markdown, json, raw-json, or zip")
 	outDir := flags.String("out", "exports", "export directory")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -136,7 +136,7 @@ func help() {
 Usage:
   grokslut verify [--provider grok|gemini] [--session session.json]
   grokslut list [--provider grok|gemini] [--all] [--page-size 60]
-  grokslut export [--provider grok|gemini] --ids ID,ID --format markdown|json|zip --out exports
+  grokslut export [--provider grok|gemini] --ids ID,ID --format markdown|json|raw-json|zip --out exports
 
 The session envelope is private: it is not logged or persisted by the CLI.
 `)

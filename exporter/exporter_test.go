@@ -106,4 +106,63 @@ func writeJSON(writer http.ResponseWriter, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(writer).Encode(value)
 }
+
+type staticHistoryClient struct{ thread grok.Thread }
+
+func (client staticHistoryClient) LoadConversationProgress(string, grok.LoadProgress) (grok.Thread, error) {
+	return client.thread, nil
+}
+func (staticHistoryClient) GetMedia(string) (*http.Response, error) { return nil, nil }
+
+func TestJSONIsNormalizedAndRawJSONPreservesProviderPayload(t *testing.T) {
+	thread := grok.Thread{
+		Conversation: grok.ConversationSummary{
+			Provider:  "gemini",
+			ID:        "c1",
+			Title:     "JSON formats",
+			UpdatedAt: "2026-09-16T00:00:00Z",
+			Raw:       json.RawMessage(`["c1","JSON formats",null,null,null,[1789516800,0]]`),
+		},
+		Responses: []json.RawMessage{
+			json.RawMessage(`{"provider":"gemini","responseId":"later","parentResponseId":"earlier","sender":"assistant","message":"Second","createTime":"2026-09-16T00:00:02Z"}`),
+			json.RawMessage(`{"provider":"gemini","responseId":"earlier","parentResponseId":"","sender":"human","message":"First","createTime":"2026-09-16T00:00:01Z","geminiTurn":[null,[null]]}`),
+		},
+	}
+	exporterInstance := exporter.Exporter{Client: staticHistoryClient{thread: thread}}
+
+	cleanResult, err := exporterInstance.Export([]string{"c1"}, exporter.JSON, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, err := os.ReadFile(cleanResult.Paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(clean), "geminiTurn") || strings.Contains(string(clean), `"conversation": [`) || strings.Contains(string(clean), "null") {
+		t.Fatalf("normalized JSON retained raw positional data:\n%s", clean)
+	}
+	var normalized struct {
+		Conversation grok.ConversationSummary `json:"conversation"`
+		Responses    []map[string]any         `json:"responses"`
+	}
+	if err := json.Unmarshal(clean, &normalized); err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Conversation.Provider != "gemini" || len(normalized.Responses) != 2 || normalized.Responses[0]["responseId"] != "earlier" {
+		t.Fatalf("unexpected normalized JSON: %#v", normalized)
+	}
+
+	rawResult, err := exporterInstance.Export([]string{"c1"}, exporter.RawJSON, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(rawResult.Paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(rawResult.Paths[0], ".raw.json") || !strings.Contains(string(raw), "geminiTurn") || !strings.Contains(string(raw), `"conversation":[`) {
+		t.Fatalf("raw JSON did not preserve provider payload: %s", raw)
+	}
+}
+
 func TestMain(m *testing.M) { os.Exit(m.Run()) }
