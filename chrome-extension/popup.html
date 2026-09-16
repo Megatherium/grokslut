@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>grokslut session bridge</title>
+  <style>
+    body { width: 300px; margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: #15171d; color: #f4f4f6; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    p { line-height: 1.4; }
+    button { width: 100%; margin-top: 8px; padding: 9px; border: 0; border-radius: 6px; background: #7357c7; color: white; font: inherit; cursor: pointer; }
+    button.secondary { background: #343741; }
+    #status { min-height: 38px; color: #c8cad1; }
+  </style>
+  <body>
+    <h1>grokslut</h1>
+    <p>Sync this Chrome profile's Grok session to the exporter running on your computer.</p>
+    <button id="sync">Sync Grok session</button>
+    <button id="grok" class="secondary">Open Grok login</button>
+    <button id="app" class="secondary">Open exporter</button>
+    <p id="status" role="status"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
