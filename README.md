@@ -15,7 +15,9 @@ The exporter lists conversations, preserves project grouping and response branch
 2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the repository's `chrome-extension` directory.
 3. Open `https://grok.com`, sign in normally, and let the conversation list load once.
 4. Open the **grokslut session bridge** extension and click **Sync Grok session**.
-5. Open `http://127.0.0.1:8787`. Conversations appear in a project tree; select chats and choose Markdown + media, JSON, or ZIP.
+5. Open `http://127.0.0.1:8787`. Conversations appear in a project tree; select chats and choose Markdown + media, JSON, or ZIP. Large exports show live message-loading progress.
+
+The exporter does not depend on Grok's progressively loaded page UI. It hydrates the complete response index directly and follows unresolved parent links until the conversation ancestry is complete.
 
 The extension reads cookies only for `grok.com`, observes only requests under `/rest/app-chat/`, and sends the resulting session envelope only to the loopback exporter. Challenge headers are kept in Chrome's in-memory session storage and cleared after a successful sync. No credential is logged or sent to another host.
 
