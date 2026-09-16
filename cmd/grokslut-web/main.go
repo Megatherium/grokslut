@@ -63,6 +63,7 @@ func main() {
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/conversations", a.conversations)
 	mux.HandleFunc("POST /api/export", a.export)
+	mux.HandleFunc("POST /api/export-stream", a.exportStream)
 	mux.Handle("GET /files/", http.StripPrefix("/files/", http.FileServer(http.Dir(a.exportDir))))
 	server := &http.Server{Addr: *address, Handler: secureHeaders(mux)}
 	log.Printf("grokslut web UI listening at http://%s", *address)
@@ -164,15 +165,66 @@ func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 		writeClientError(writer, err)
 		return
 	}
+	if err := a.relativize(&result); err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *app) exportStream(writer http.ResponseWriter, request *http.Request) {
+	if !trustedOrigin(request) {
+		writeError(writer, http.StatusForbidden, errors.New("untrusted request origin"))
+		return
+	}
+	client := a.getClient()
+	if client == nil {
+		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
+		return
+	}
+	var input exportRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10)).Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if len(input.IDs) == 0 {
+		writeError(writer, http.StatusBadRequest, errors.New("select at least one conversation"))
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/x-ndjson")
+	writer.Header().Set("Cache-Control", "no-store")
+	encoder := json.NewEncoder(writer)
+	flusher, _ := writer.(http.Flusher)
+	send := func(value any) {
+		_ = encoder.Encode(value)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	result, err := (exporter.Exporter{Client: client}).Export(input.IDs, input.Format, a.exportDir, func(progress exporter.Progress) {
+		send(map[string]any{"type": "progress", "progress": progress})
+	})
+	if err != nil {
+		send(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+	if err := a.relativize(&result); err != nil {
+		send(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+	send(map[string]any{"type": "result", "result": result})
+}
+
+func (a *app) relativize(result *exporter.Result) error {
 	for index, item := range result.Paths {
 		relative, err := filepath.Rel(a.exportDir, item)
 		if err != nil || strings.HasPrefix(relative, "..") {
-			writeError(writer, http.StatusInternalServerError, errors.New("invalid export path"))
-			return
+			return errors.New("invalid export path")
 		}
 		result.Paths[index] = filepath.ToSlash(relative)
 	}
-	writeJSON(writer, http.StatusOK, result)
+	return nil
 }
 func (a *app) getClient() *grok.Client { a.mu.RLock(); defer a.mu.RUnlock(); return a.client }
 func tree(conversations []grok.ConversationSummary) []project {

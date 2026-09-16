@@ -33,9 +33,10 @@ type Result struct {
 	Warnings []string `json:"warnings"`
 }
 type Progress struct {
-	Phase          string
-	Current, Total int
-	ID             string
+	Phase   string `json:"phase"`
+	Current int    `json:"current"`
+	Total   int    `json:"total"`
+	ID      string `json:"id"`
 }
 type ProgressFunc func(Progress)
 type Exporter struct{ Client *grok.Client }
@@ -52,8 +53,10 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 	}
 	threads := make([]grok.Thread, 0, len(ids))
 	for index, id := range ids {
-		notify(progress, Progress{"loading", index + 1, len(ids), id})
-		thread, err := e.Client.LoadConversation(id)
+		notify(progress, Progress{Phase: "loading", Current: index + 1, Total: len(ids), ID: id})
+		thread, err := e.Client.LoadConversationProgress(id, func(loaded, total int) {
+			notify(progress, Progress{Phase: "responses", Current: loaded, Total: total, ID: id})
+		})
 		if err != nil {
 			return Result{}, err
 		}
@@ -74,7 +77,7 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 		}
 		result.Paths = append(result.Paths, files...)
 		result.Warnings = append(result.Warnings, warnings...)
-		notify(progress, Progress{"writing", index + 1, len(threads), thread.Conversation.ID})
+		notify(progress, Progress{Phase: "writing", Current: index + 1, Total: len(threads), ID: thread.Conversation.ID})
 	}
 	return result, nil
 }
@@ -103,7 +106,7 @@ func (e Exporter) writeZIP(threads []grok.Thread, outDir string, progress Progre
 				return Result{}, err
 			}
 		}
-		notify(progress, Progress{"writing", index + 1, len(threads), thread.Conversation.ID})
+		notify(progress, Progress{Phase: "writing", Current: index + 1, Total: len(threads), ID: thread.Conversation.ID})
 	}
 	if err := zipWriter.Close(); err != nil {
 		file.Close()

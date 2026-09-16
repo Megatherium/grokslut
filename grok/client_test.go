@@ -59,6 +59,82 @@ func TestClientListsAndLoadsUsingSessionCookie(t *testing.T) {
 	}
 }
 
+func TestLoadConversationFollowsMissingParentChain(t *testing.T) {
+	var loads [][]string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.Contains(request.URL.Path, "/response-node"):
+			writeJSON(writer, map[string]any{"conversation": map[string]string{"id": "c1", "title": "Long chat"}, "responseNodes": []any{map[string]string{"responseId": "newest"}}})
+		case strings.Contains(request.URL.Path, "/load-responses"):
+			var body struct {
+				ResponseIDs []string `json:"responseIds"`
+			}
+			json.NewDecoder(request.Body).Decode(&body)
+			loads = append(loads, body.ResponseIDs)
+			responses := make([]map[string]string, 0, len(body.ResponseIDs))
+			for _, id := range body.ResponseIDs {
+				switch id {
+				case "newest":
+					responses = append(responses, map[string]string{"responseId": id, "parentResponseId": "older"})
+				case "older":
+					responses = append(responses, map[string]string{"responseId": id, "parentResponseId": "root"})
+				case "root":
+					responses = append(responses, map[string]string{"responseId": id, "sender": "system"})
+				}
+			}
+			writeJSON(writer, map[string]any{"responses": responses})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	var progress [][2]int
+	thread, err := fixtureClient(t, server.URL).LoadConversationProgress("c1", func(loaded, total int) {
+		progress = append(progress, [2]int{loaded, total})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(thread.Responses) != 3 {
+		t.Fatalf("got %d responses, want complete three-response chain", len(thread.Responses))
+	}
+	if len(loads) != 3 || loads[0][0] != "newest" || loads[1][0] != "older" || loads[2][0] != "root" {
+		t.Fatalf("unexpected load sequence: %#v", loads)
+	}
+	last := progress[len(progress)-1]
+	if last != [2]int{3, 3} {
+		t.Fatalf("final progress = %v, want 3/3", last)
+	}
+}
+
+func TestLoadConversationRejectsUnresolvedParent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.Contains(request.URL.Path, "/response-node"):
+			writeJSON(writer, map[string]any{"responseNodes": []any{map[string]string{"responseId": "child"}}})
+		case strings.Contains(request.URL.Path, "/load-responses"):
+			var body struct {
+				ResponseIDs []string `json:"responseIds"`
+			}
+			json.NewDecoder(request.Body).Decode(&body)
+			if len(body.ResponseIDs) > 0 && body.ResponseIDs[0] == "child" {
+				writeJSON(writer, map[string]any{"responses": []any{map[string]string{"responseId": "child", "parentResponseId": "missing"}}})
+				return
+			}
+			writeJSON(writer, map[string]any{"responses": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	_, err := fixtureClient(t, server.URL).LoadConversation("c1")
+	if err == nil || !strings.Contains(err.Error(), "referenced ancestor") {
+		t.Fatalf("expected unresolved-ancestor error, got %v", err)
+	}
+}
+
 func TestAuthFailureIsTyped(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "no", http.StatusUnauthorized)

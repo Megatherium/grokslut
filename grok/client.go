@@ -109,7 +109,16 @@ func (c *Client) ListAllConversations(pageSize int) ([]ConversationSummary, erro
 	return all, fmt.Errorf("conversation pagination exceeded 100 pages")
 }
 
+type LoadProgress func(loaded, total int)
+
 func (c *Client) LoadConversation(id string) (Thread, error) {
+	return c.LoadConversationProgress(id, nil)
+}
+
+// LoadConversationProgress hydrates every response named by Grok's node index,
+// then follows unresolved parent links until the complete ancestry is loaded.
+// This bypasses the web UI's progressive scroll-based hydration.
+func (c *Client) LoadConversationProgress(id string, progress LoadProgress) (Thread, error) {
 	if id == "" {
 		return Thread{}, errors.New("conversation id is required")
 	}
@@ -120,19 +129,86 @@ func (c *Client) LoadConversation(id string) (Thread, error) {
 	}
 	responseIDs := unique(collectResponseIDs(nodes))
 	thread := Thread{Conversation: conversationFromNodes(nodes, id), Nodes: nodes}
-	for _, ids := range chunk(responseIDs, 75) {
-		payload, _ := json.Marshal(map[string][]string{"responseIds": ids})
-		raw, err := c.request(http.MethodPost, "/rest/app-chat/conversations/"+safeID+"/load-responses", payload)
-		if err != nil {
+	loaded := map[string]bool{}
+	attempted := map[string]bool{}
+	total := len(responseIDs)
+	notifyLoadProgress(progress, 0, total)
+
+	load := func(ids []string) error {
+		for _, batch := range chunk(ids, 75) {
+			for _, responseID := range batch {
+				attempted[responseID] = true
+			}
+			payload, _ := json.Marshal(map[string][]string{"responseIds": batch})
+			raw, err := c.request(http.MethodPost, "/rest/app-chat/conversations/"+safeID+"/load-responses", payload)
+			if err != nil {
+				return err
+			}
+			responses, err := responseArray(raw)
+			if err != nil {
+				return err
+			}
+			for _, response := range responses {
+				responseID := responseString(response, "responseId", "id", "response_id")
+				if responseID != "" && loaded[responseID] {
+					continue
+				}
+				if responseID != "" {
+					loaded[responseID] = true
+				}
+				thread.Responses = append(thread.Responses, response)
+			}
+			notifyLoadProgress(progress, len(thread.Responses), total)
+		}
+		return nil
+	}
+
+	if err := load(responseIDs); err != nil {
+		return Thread{}, err
+	}
+	for {
+		var missing []string
+		for _, response := range thread.Responses {
+			parentID := responseString(response, "parentResponseId", "parentId", "parent_id")
+			if parentID != "" && !loaded[parentID] && !attempted[parentID] {
+				missing = append(missing, parentID)
+			}
+		}
+		missing = unique(missing)
+		if len(missing) == 0 {
+			break
+		}
+		total += len(missing)
+		notifyLoadProgress(progress, len(thread.Responses), total)
+		if err := load(missing); err != nil {
 			return Thread{}, err
 		}
-		responses, err := responseArray(raw)
-		if err != nil {
-			return Thread{}, err
+	}
+	var unresolved []string
+	for _, response := range thread.Responses {
+		parentID := responseString(response, "parentResponseId", "parentId", "parent_id")
+		if parentID != "" && !loaded[parentID] {
+			unresolved = append(unresolved, parentID)
 		}
-		thread.Responses = append(thread.Responses, responses...)
+	}
+	if unresolved = unique(unresolved); len(unresolved) > 0 {
+		return Thread{}, fmt.Errorf("Grok did not return %d referenced ancestor response(s)", len(unresolved))
 	}
 	return thread, nil
+}
+
+func notifyLoadProgress(progress LoadProgress, loaded, total int) {
+	if progress != nil {
+		progress(loaded, total)
+	}
+}
+
+func responseString(raw json.RawMessage, keys ...string) string {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return ""
+	}
+	return firstString(object, keys...)
 }
 
 // GetMedia downloads an asset with the same session and browser headers.

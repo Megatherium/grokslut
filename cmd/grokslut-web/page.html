@@ -14,6 +14,7 @@
     .muted { color: #b6bac7; font-size: .9rem; }
     .warning { color: #ffcc80; }
     .hidden { display: none; }
+    #export-progress { width: 100%; accent-color: #9b7de0; }
     a { color: #cbb9ff; }
   </style>
   <body>
@@ -38,6 +39,10 @@
       <button data-format="markdown">Markdown + media</button>
       <button data-format="json">JSON</button>
       <button data-format="zip">ZIP bundle</button>
+      <div id="progress" class="hidden">
+        <p id="progress-label" class="muted">Preparing export…</p>
+        <progress id="export-progress"></progress>
+      </div>
       <div id="result"></div>
     </section>
     <script>
@@ -94,22 +99,66 @@
         $("#logout").classList.toggle("hidden", !state.authenticated);
         if (state.authenticated) await loadConversations();
       }
+      function showProgress(progress) {
+        const bar = $("#export-progress");
+        const labels = { loading: "Loading conversation", responses: "Loading messages", writing: "Writing files" };
+        $("#progress").classList.remove("hidden");
+        $("#progress-label").textContent = (labels[progress.phase] || progress.phase) + ": " + progress.current + " / " + progress.total;
+        bar.max = Math.max(progress.total, 1);
+        bar.value = progress.current;
+      }
+      async function exportSelected(format) {
+        const response = await fetch("/api/export-stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], format }) });
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let result;
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line) continue;
+            const event = JSON.parse(line);
+            if (event.type === "progress") showProgress(event.progress);
+            if (event.type === "error") throw new Error(event.error);
+            if (event.type === "result") result = event.result;
+          }
+          if (done) break;
+        }
+        if (!result) throw new Error("Export ended without a result");
+        return result;
+      }
       $("#logout").addEventListener("click", async () => {
         await api("/api/logout", { method: "POST" });
         selected.clear(); updateSelection(); $("#chats").classList.add("hidden"); await loadStatus();
       });
       $("#refresh").addEventListener("click", () => loadConversations().catch((error) => alert(error.message)));
       document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
+        const buttons = [...document.querySelectorAll("[data-format]")];
         try {
-          const result = await api("/api/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], format: button.dataset.format }) });
+          buttons.forEach((item) => item.disabled = true);
+          $("#result").replaceChildren();
+          $("#progress").classList.remove("hidden");
+          $("#progress-label").textContent = "Preparing export…";
+          $("#export-progress").removeAttribute("value");
+          const result = await exportSelected(button.dataset.format);
           const output = $("#result"); output.replaceChildren();
           for (const path of result.paths) {
             const link = document.createElement("a");
             link.href = "/files/" + path.split("/").map(encodeURIComponent).join("/");
             link.textContent = "Download " + path; link.style.display = "block"; output.append(link);
           }
-          for (const warning of result.warnings) { const line = document.createElement("p"); line.className = "warning"; line.textContent = warning; output.append(line); }
+          for (const warning of result.warnings || []) { const line = document.createElement("p"); line.className = "warning"; line.textContent = warning; output.append(line); }
+          $("#progress-label").textContent = "Export complete.";
+          $("#export-progress").value = $("#export-progress").max;
         } catch (error) { alert(error.message); }
+        finally { buttons.forEach((item) => item.disabled = false); }
       }));
       loadStatus().catch((error) => { $("#status").textContent = error.message; });
     </script>
