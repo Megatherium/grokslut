@@ -12,6 +12,18 @@ import (
 	"github.com/Megatherium/grokslut/store"
 )
 
+type countingProviderClient struct{ listCalls int }
+
+func (c *countingProviderClient) ListAllConversations(int) ([]grok.ConversationSummary, error) {
+	c.listCalls++
+	return []grok.ConversationSummary{{ID: "one", Title: "Cached title"}}, nil
+}
+func (*countingProviderClient) LoadConversationProgress(string, grok.LoadProgress) (grok.Thread, error) {
+	return grok.Thread{}, nil
+}
+func (*countingProviderClient) GetMedia(string) (*http.Response, error) { return nil, nil }
+func (*countingProviderClient) Verify() error                           { return nil }
+
 func TestSaveSessionCreatesSharedSessionAndStatus(t *testing.T) {
 	sessionPath := filepath.Join(t.TempDir(), "session.json")
 	app := &app{sessionPaths: map[string]string{"grok": sessionPath}, clients: map[string]providerClient{}, exportDir: t.TempDir()}
@@ -60,5 +72,24 @@ func TestSessionBridgeRejectsCrossSiteOrigin(t *testing.T) {
 	a.saveSession(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("got status %d", response.Code)
+	}
+}
+
+func TestConversationsCacheUntilExplicitRefresh(t *testing.T) {
+	client := &countingProviderClient{}
+	a := &app{clients: map[string]providerClient{"gemini": client}, conversationCache: map[string][]project{}}
+	for _, target := range []string{
+		"/api/conversations?provider=gemini",
+		"/api/conversations?provider=gemini",
+		"/api/conversations?provider=gemini&refresh=1",
+	} {
+		response := httptest.NewRecorder()
+		a.conversations(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s returned %d: %s", target, response.Code, response.Body.String())
+		}
+	}
+	if client.listCalls != 2 {
+		t.Fatalf("list calls = %d, want initial load plus explicit refresh", client.listCalls)
 	}
 }

@@ -21,6 +21,8 @@
     .muted { color: #b6bac7; font-size: .9rem; }
     .warning { color: #ffcc80; }
     .hidden { display: none; }
+    .spinner { display: inline-block; width: .85rem; height: .85rem; border: 2px solid #737887; border-top-color: #cbb9ff; border-radius: 50%; vertical-align: -.12rem; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     #export-progress { width: 100%; accent-color: #9b7de0; }
     a { color: #cbb9ff; }
   </style>
@@ -42,6 +44,7 @@
           <label>Source <select id="provider"><option value="grok">Grok</option><option value="gemini">Gemini</option></select></label>
           <input id="filter" type="search" placeholder="Filter conversations or projects…" aria-label="Filter conversations">
           <button class="alt" id="refresh">Refresh</button>
+          <span id="conversation-loading" class="muted hidden" role="status"><span class="spinner" aria-hidden="true"></span> Loading titles…</span>
           <span id="filter-count" class="muted"></span>
         </div>
         <div id="export" class="hidden">
@@ -64,6 +67,7 @@
       const $ = (selector) => document.querySelector(selector);
       const selected = new Set();
       let providerState = { grok: false, gemini: false };
+      let conversationLoad = 0;
       async function api(path, options) {
         const response = await fetch(path, options);
         const data = await response.json();
@@ -113,11 +117,28 @@
         });
         $("#filter-count").textContent = term ? shown + " of " + total : total + " conversations";
       }
-      async function loadConversations() {
+      async function loadConversations({ refresh = false } = {}) {
+        const loadID = ++conversationLoad;
         const tree = $("#tree");
         tree.replaceChildren();
-        $("#filter-count").textContent = "Loading…";
-        const groups = await api("/api/conversations?provider=" + encodeURIComponent($("#provider").value));
+        $("#filter-count").textContent = "";
+        $("#refresh").disabled = true;
+        const loadingTimer = setTimeout(() => {
+          if (loadID === conversationLoad) $("#conversation-loading").classList.remove("hidden");
+        }, 1000);
+        let groups;
+        try {
+          const query = new URLSearchParams({ provider: $("#provider").value });
+          if (refresh) query.set("refresh", "1");
+          groups = await api("/api/conversations?" + query);
+        } finally {
+          clearTimeout(loadingTimer);
+          if (loadID === conversationLoad) {
+            $("#conversation-loading").classList.add("hidden");
+            $("#refresh").disabled = false;
+          }
+        }
+        if (loadID !== conversationLoad) return;
         for (const group of groups) {
           const branch = document.createElement("details");
           branch.open = true;
@@ -185,7 +206,7 @@
           selected.clear(); updateSelection(); $("#result").replaceChildren(); await loadConversations();
         } catch (error) { alert(error.message); }
       });
-      $("#refresh").addEventListener("click", () => loadConversations().catch((error) => alert(error.message)));
+      $("#refresh").addEventListener("click", () => loadConversations({ refresh: true }).catch((error) => alert(error.message)));
       document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
         const buttons = [...document.querySelectorAll("[data-format]")];
         try {
