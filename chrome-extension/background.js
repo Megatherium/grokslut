@@ -17,11 +17,12 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       }
     }
     if (Object.keys(headers).length) {
-      chrome.storage.session.get("grokHeaders").then(({ grokHeaders = {} }) =>
-        chrome.storage.session.set({ grokHeaders: { ...grokHeaders, ...headers } }),
+      const key = details.url.startsWith("https://gemini.google.com/") ? "geminiHeaders" : "grokHeaders";
+      chrome.storage.session.get(key).then((stored) =>
+        chrome.storage.session.set({ [key]: { ...(stored[key] || {}), ...headers } }),
       );
     }
   },
-  { urls: ["https://grok.com/rest/app-chat/*"] },
+  { urls: ["https://grok.com/rest/app-chat/*", "https://gemini.google.com/_/BardChatUi/data/*"] },
   ["requestHeaders", "extraHeaders"],
 );

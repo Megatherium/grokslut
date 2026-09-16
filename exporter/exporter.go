@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -39,7 +40,13 @@ type Progress struct {
 	ID      string `json:"id"`
 }
 type ProgressFunc func(Progress)
-type Exporter struct{ Client *grok.Client }
+
+type HistoryClient interface {
+	LoadConversationProgress(string, grok.LoadProgress) (grok.Thread, error)
+	GetMedia(string) (*http.Response, error)
+}
+
+type Exporter struct{ Client HistoryClient }
 
 func (e Exporter) Export(ids []string, format Format, outDir string, progress ProgressFunc) (Result, error) {
 	if len(ids) == 0 {

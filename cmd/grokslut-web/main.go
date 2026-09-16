@@ -18,6 +18,7 @@ import (
 
 	"github.com/Megatherium/grokslut/auth"
 	"github.com/Megatherium/grokslut/exporter"
+	"github.com/Megatherium/grokslut/gemini"
 	"github.com/Megatherium/grokslut/grok"
 	"github.com/Megatherium/grokslut/store"
 )
@@ -26,10 +27,17 @@ import (
 var page string
 
 type app struct {
-	mu                     sync.RWMutex
-	client                 *grok.Client
-	sessionPath, exportDir string
-	verify                 func(*grok.Client) error
+	mu           sync.RWMutex
+	clients      map[string]providerClient
+	sessionPaths map[string]string
+	exportDir    string
+	verify       func(string, providerClient) error
+}
+type providerClient interface {
+	ListAllConversations(int) ([]grok.ConversationSummary, error)
+	LoadConversationProgress(string, grok.LoadProgress) (grok.Thread, error)
+	GetMedia(string) (*http.Response, error)
+	Verify() error
 }
 type project struct {
 	ID            string                     `json:"id"`
@@ -37,29 +45,40 @@ type project struct {
 	Conversations []grok.ConversationSummary `json:"conversations"`
 }
 type exportRequest struct {
-	IDs    []string        `json:"ids"`
-	Format exporter.Format `json:"format"`
+	Provider string          `json:"provider"`
+	IDs      []string        `json:"ids"`
+	Format   exporter.Format `json:"format"`
 }
 
 func main() {
 	defaultSession, _ := store.DefaultSessionPath()
+	defaultGeminiSession, _ := store.DefaultProviderSessionPath("gemini")
 	address := flag.String("listen", "127.0.0.1:8787", "loopback address for the web UI")
-	sessionPath := flag.String("session", defaultSession, "shared CLI session file")
+	sessionPath := flag.String("session", defaultSession, "shared Grok CLI session file")
+	geminiSessionPath := flag.String("gemini-session", defaultGeminiSession, "shared Gemini CLI session file")
 	exportDir := flag.String("exports", "exports", "export directory")
 	flag.Parse()
 	if !isLoopback(*address) {
 		log.Fatal("--listen must use localhost or a loopback address")
 	}
-	a := &app{sessionPath: *sessionPath, exportDir: *exportDir, verify: func(client *grok.Client) error { return client.Verify() }}
-	if session, err := store.Load(a.sessionPath); err == nil {
-		if client, createErr := grok.NewClient(session, "https://grok.com"); createErr == nil {
-			a.client = client
+	a := &app{
+		clients:      map[string]providerClient{},
+		sessionPaths: map[string]string{"grok": *sessionPath, "gemini": *geminiSessionPath},
+		exportDir:    *exportDir,
+		verify:       func(_ string, client providerClient) error { return client.Verify() },
+	}
+	for _, provider := range []string{"grok", "gemini"} {
+		if session, err := store.Load(a.sessionPaths[provider]); err == nil {
+			if client, createErr := newProviderClient(provider, session); createErr == nil {
+				a.clients[provider] = client
+			}
 		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", a.index)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("POST /api/session", a.saveSession)
+	mux.HandleFunc("POST /api/session/{provider}", a.saveProviderSession)
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/conversations", a.conversations)
 	mux.HandleFunc("POST /api/export", a.export)
@@ -75,9 +94,16 @@ func (a *app) index(writer http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(writer, page)
 }
 func (a *app) status(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]bool{"authenticated": a.getClient() != nil})
+	providers := map[string]bool{"grok": a.getClient("grok") != nil, "gemini": a.getClient("gemini") != nil}
+	writeJSON(writer, http.StatusOK, map[string]any{"authenticated": providers["grok"] || providers["gemini"], "providers": providers})
 }
 func (a *app) saveSession(writer http.ResponseWriter, request *http.Request) {
+	a.saveSessionFor("grok", writer, request)
+}
+func (a *app) saveProviderSession(writer http.ResponseWriter, request *http.Request) {
+	a.saveSessionFor(request.PathValue("provider"), writer, request)
+}
+func (a *app) saveSessionFor(provider string, writer http.ResponseWriter, request *http.Request) {
 	if !trustedOrigin(request) {
 		writeError(writer, http.StatusForbidden, errors.New("untrusted session bridge origin"))
 		return
@@ -94,23 +120,31 @@ func (a *app) saveSession(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	client, err := grok.NewClient(session, "https://grok.com")
+	client, err := newProviderClient(provider, session)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
 	if a.verify != nil {
-		if err := a.verify(client); err != nil {
+		if err := a.verify(provider, client); err != nil {
 			writeClientError(writer, err)
 			return
 		}
 	}
-	if err := store.Save(a.sessionPath, session); err != nil {
+	sessionPath := a.sessionPaths[provider]
+	if sessionPath == "" {
+		writeError(writer, http.StatusBadRequest, errors.New("unsupported provider"))
+		return
+	}
+	if err := store.Save(sessionPath, session); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
 	a.mu.Lock()
-	a.client = client
+	if a.clients == nil {
+		a.clients = map[string]providerClient{}
+	}
+	a.clients[provider] = client
 	a.mu.Unlock()
 	writeJSON(writer, http.StatusCreated, map[string]bool{"ok": true})
 }
@@ -119,22 +153,29 @@ func (a *app) logout(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, errors.New("untrusted request origin"))
 		return
 	}
-	if err := store.Clear(a.sessionPath); err != nil {
+	provider := requestedProvider(request)
+	sessionPath := a.sessionPaths[provider]
+	if sessionPath == "" {
+		writeError(writer, http.StatusBadRequest, errors.New("unsupported provider"))
+		return
+	}
+	if err := store.Clear(sessionPath); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
 	a.mu.Lock()
-	a.client = nil
+	delete(a.clients, provider)
 	a.mu.Unlock()
 	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
-func (a *app) conversations(writer http.ResponseWriter, _ *http.Request) {
-	client := a.getClient()
+func (a *app) conversations(writer http.ResponseWriter, request *http.Request) {
+	provider := requestedProvider(request)
+	client := a.getClient(provider)
 	if client == nil {
 		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
-	conversations, err := client.ListAllConversations(60)
+	conversations, err := client.ListAllConversations(100)
 	if err != nil {
 		writeClientError(writer, err)
 		return
@@ -146,11 +187,6 @@ func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, errors.New("untrusted request origin"))
 		return
 	}
-	client := a.getClient()
-	if client == nil {
-		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
-		return
-	}
 	var input exportRequest
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10)).Decode(&input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
@@ -158,6 +194,11 @@ func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 	}
 	if len(input.IDs) == 0 {
 		writeError(writer, http.StatusBadRequest, errors.New("select at least one conversation"))
+		return
+	}
+	client := a.getClient(normalizeProvider(input.Provider))
+	if client == nil {
+		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
 	result, err := (exporter.Exporter{Client: client}).Export(input.IDs, input.Format, a.exportDir, nil)
@@ -177,11 +218,6 @@ func (a *app) exportStream(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, errors.New("untrusted request origin"))
 		return
 	}
-	client := a.getClient()
-	if client == nil {
-		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
-		return
-	}
 	var input exportRequest
 	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64<<10)).Decode(&input); err != nil {
 		writeError(writer, http.StatusBadRequest, err)
@@ -189,6 +225,11 @@ func (a *app) exportStream(writer http.ResponseWriter, request *http.Request) {
 	}
 	if len(input.IDs) == 0 {
 		writeError(writer, http.StatusBadRequest, errors.New("select at least one conversation"))
+		return
+	}
+	client := a.getClient(normalizeProvider(input.Provider))
+	if client == nil {
+		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
 
@@ -226,7 +267,31 @@ func (a *app) relativize(result *exporter.Result) error {
 	}
 	return nil
 }
-func (a *app) getClient() *grok.Client { a.mu.RLock(); defer a.mu.RUnlock(); return a.client }
+func (a *app) getClient(provider string) providerClient {
+	provider = normalizeProvider(provider)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.clients[provider]
+}
+func normalizeProvider(provider string) string {
+	if provider == "" {
+		return "grok"
+	}
+	return provider
+}
+func requestedProvider(request *http.Request) string {
+	return normalizeProvider(request.URL.Query().Get("provider"))
+}
+func newProviderClient(provider string, session auth.Session) (providerClient, error) {
+	switch normalizeProvider(provider) {
+	case "grok":
+		return grok.NewClient(session, "https://grok.com")
+	case "gemini":
+		return gemini.NewClient(session, "https://gemini.google.com")
+	default:
+		return nil, errors.New("unsupported provider")
+	}
+}
 func tree(conversations []grok.ConversationSummary) []project {
 	groups := map[string]*project{}
 	for _, conversation := range conversations {
