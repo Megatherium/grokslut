@@ -66,6 +66,29 @@ func TestSafeNameCannotEscapeDestination(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownHydratesGrokMessageStringsInCreateTimeOrder(t *testing.T) {
+	thread := grok.Thread{
+		Conversation: grok.ConversationSummary{ID: "c1", Title: "Hydrated chat"},
+		Responses: []json.RawMessage{
+			json.RawMessage(`{"responseId":"later","sender":"assistant","message":"Second turn","createTime":"2026-01-02T00:00:00Z"}`),
+			json.RawMessage(`{"responseId":"earlier","sender":"human","message":"First turn","createTime":"2026-01-01T00:00:00Z"}`),
+			json.RawMessage(`{"responseId":"partial-stub","sender":"assistant","message":"","partial":true,"createTime":"2026-01-01T12:00:00Z"}`),
+		},
+	}
+
+	markdown := exporter.RenderMarkdown(thread, nil)
+	if strings.Contains(markdown, "No text content") {
+		t.Fatalf("Grok message strings were not hydrated:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "partial-stub") {
+		t.Fatalf("bodyless response stub leaked into Markdown:\n%s", markdown)
+	}
+	first, second := strings.Index(markdown, "First turn"), strings.Index(markdown, "Second turn")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("responses not rendered in createTime order:\n%s", markdown)
+	}
+}
+
 func fixtureClient(t *testing.T, rawURL string) *grok.Client {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)

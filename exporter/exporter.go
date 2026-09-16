@@ -197,11 +197,15 @@ func RenderMarkdown(thread grok.Thread, replacements map[string]string) string {
 		for remote, local := range replacements {
 			body = strings.ReplaceAll(body, remote, local)
 		}
+		body = strings.TrimSpace(body)
+		if body == "" {
+			continue
+		}
 		heading := "## " + author
 		if id != "" {
 			heading += " (" + id + ")"
 		}
-		lines = append(lines, heading, "", defaultString(strings.TrimSpace(body), "_No text content_"), "")
+		lines = append(lines, heading, "", body, "")
 		if parent != "" {
 			lines = append(lines, "_Parent response: "+parent+"_", "")
 		}
@@ -252,12 +256,12 @@ func responseFields(raw json.RawMessage) (author, id, parent, body string) {
 	return
 }
 func contentAt(object map[string]any) string {
-	for _, key := range []string{"content", "text"} {
+	for _, key := range []string{"message", "content", "text"} {
 		if result := contentString(object[key]); result != "" {
 			return result
 		}
 	}
-	for _, key := range []string{"message", "response"} {
+	for _, key := range []string{"response"} {
 		if nested, ok := object[key].(map[string]any); ok {
 			if result := contentAt(nested); result != "" {
 				return result
@@ -292,7 +296,7 @@ func stringAt(object map[string]any, keys ...string) string {
 func responseTime(raw json.RawMessage) string {
 	var object map[string]any
 	_ = json.Unmarshal(raw, &object)
-	return stringAt(object, "createdAt", "created_at", "timestamp")
+	return stringAt(object, "createTime", "createdAt", "created_at", "timestamp")
 }
 func defaultString(value, fallback string) string {
 	if value == "" {
