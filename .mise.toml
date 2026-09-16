@@ -1,0 +1,13 @@
+[tools]
+android-sdk = "23.0"
+go = "1.22"
+java = "17"
+
+[tasks.android-sdk]
+description = "Install the Android platform, build tools, and NDK"
+run = "sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'"
+
+[tasks.android]
+description = "Build the Go AAR and debug APK"
+depends = ["android-sdk"]
+run = "scripts/build-android.sh"

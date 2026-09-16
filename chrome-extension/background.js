@@ -3,6 +3,8 @@ const capturedHeaderNames = new Set([
   "x-challenge",
   "x-signature",
   "x-statsig-id",
+  "user-agent",
+  "accept-language",
 ]);
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
@@ -21,5 +23,5 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }
   },
   { urls: ["https://grok.com/rest/app-chat/*"] },
-  ["requestHeaders"],
+  ["requestHeaders", "extraHeaders"],
 );
