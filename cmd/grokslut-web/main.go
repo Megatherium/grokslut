@@ -27,11 +27,12 @@ import (
 var page string
 
 type app struct {
-	mu           sync.RWMutex
-	clients      map[string]providerClient
-	sessionPaths map[string]string
-	exportDir    string
-	verify       func(string, providerClient) error
+	mu                sync.RWMutex
+	clients           map[string]providerClient
+	sessionPaths      map[string]string
+	conversationCache map[string][]project
+	exportDir         string
+	verify            func(string, providerClient) error
 }
 type providerClient interface {
 	ListAllConversations(int) ([]grok.ConversationSummary, error)
@@ -62,10 +63,11 @@ func main() {
 		log.Fatal("--listen must use localhost or a loopback address")
 	}
 	a := &app{
-		clients:      map[string]providerClient{},
-		sessionPaths: map[string]string{"grok": *sessionPath, "gemini": *geminiSessionPath},
-		exportDir:    *exportDir,
-		verify:       func(_ string, client providerClient) error { return client.Verify() },
+		clients:           map[string]providerClient{},
+		sessionPaths:      map[string]string{"grok": *sessionPath, "gemini": *geminiSessionPath},
+		conversationCache: map[string][]project{},
+		exportDir:         *exportDir,
+		verify:            func(_ string, client providerClient) error { return client.Verify() },
 	}
 	for _, provider := range []string{"grok", "gemini"} {
 		if session, err := store.Load(a.sessionPaths[provider]); err == nil {
@@ -145,6 +147,7 @@ func (a *app) saveSessionFor(provider string, writer http.ResponseWriter, reques
 		a.clients = map[string]providerClient{}
 	}
 	a.clients[provider] = client
+	delete(a.conversationCache, provider)
 	a.mu.Unlock()
 	writeJSON(writer, http.StatusCreated, map[string]bool{"ok": true})
 }
@@ -165,6 +168,7 @@ func (a *app) logout(writer http.ResponseWriter, request *http.Request) {
 	}
 	a.mu.Lock()
 	delete(a.clients, provider)
+	delete(a.conversationCache, provider)
 	a.mu.Unlock()
 	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -175,12 +179,28 @@ func (a *app) conversations(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
+	if request.URL.Query().Get("refresh") != "1" {
+		a.mu.RLock()
+		cached, found := a.conversationCache[provider]
+		a.mu.RUnlock()
+		if found {
+			writeJSON(writer, http.StatusOK, cached)
+			return
+		}
+	}
 	conversations, err := client.ListAllConversations(100)
 	if err != nil {
 		writeClientError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, tree(conversations))
+	groups := tree(conversations)
+	a.mu.Lock()
+	if a.conversationCache == nil {
+		a.conversationCache = map[string][]project{}
+	}
+	a.conversationCache[provider] = groups
+	a.mu.Unlock()
+	writeJSON(writer, http.StatusOK, groups)
 }
 func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 	if !trustedOrigin(request) {
