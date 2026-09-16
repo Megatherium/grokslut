@@ -7,7 +7,8 @@
     body { font: 16px system-ui, sans-serif; max-width: 900px; margin: 3rem auto; padding: 0 1rem; background: #101218; color: #eceef4; }
     button { cursor: pointer; background: #6750a4; color: #fff; border: 0; border-radius: .4rem; padding: .55rem .8rem; font: inherit; }
     button.alt { background: #30333d; }
-    input[type="search"] { flex: 1; min-width: 12rem; background: #101218; color: #eceef4; border: 1px solid #4a4f5d; border-radius: .4rem; padding: .55rem .7rem; font: inherit; }
+    input[type="search"], select { background: #101218; color: #eceef4; border: 1px solid #4a4f5d; border-radius: .4rem; padding: .55rem .7rem; font: inherit; }
+    input[type="search"] { flex: 1; min-width: 12rem; }
     section { background: #1c1f27; border-radius: .75rem; padding: 1rem 1.25rem; margin: 1rem 0; }
     details { padding: .6rem; border-bottom: 1px solid #343843; }
     .chat { display: flex; gap: .6rem; padding: .45rem; }
@@ -30,7 +31,7 @@
       <h2>Browser session</h2>
       <p id="status">Checking the shared session…</p>
       <div id="connect" class="hidden">
-        <p>Sign in normally at <a href="https://grok.com/" target="_blank">Grok</a>, then click <strong>Sync Grok session</strong> in the unpacked grokslut extension.</p>
+        <p>Sign in normally at <a href="https://grok.com/" target="_blank">Grok</a> or <a href="https://gemini.google.com/" target="_blank">Gemini</a>, then sync that provider in the unpacked grokslut extension.</p>
       </div>
       <button class="alt hidden" id="logout">Clear local session</button>
     </section>
@@ -38,6 +39,7 @@
       <h2>Conversations</h2>
       <div class="conversation-toolbar">
         <div class="filter-row">
+          <label>Source <select id="provider"><option value="grok">Grok</option><option value="gemini">Gemini</option></select></label>
           <input id="filter" type="search" placeholder="Filter conversations or projects…" aria-label="Filter conversations">
           <button class="alt" id="refresh">Refresh</button>
           <span id="filter-count" class="muted"></span>
@@ -61,6 +63,7 @@
     <script>
       const $ = (selector) => document.querySelector(selector);
       const selected = new Set();
+      let providerState = { grok: false, gemini: false };
       async function api(path, options) {
         const response = await fetch(path, options);
         const data = await response.json();
@@ -111,9 +114,10 @@
         $("#filter-count").textContent = term ? shown + " of " + total : total + " conversations";
       }
       async function loadConversations() {
-        const groups = await api("/api/conversations");
         const tree = $("#tree");
         tree.replaceChildren();
+        $("#filter-count").textContent = "Loading…";
+        const groups = await api("/api/conversations?provider=" + encodeURIComponent($("#provider").value));
         for (const group of groups) {
           const branch = document.createElement("details");
           branch.open = true;
@@ -127,9 +131,13 @@
       }
       async function loadStatus() {
         const state = await api("/api/status");
-        $("#status").textContent = state.authenticated ? "Connected to your shared local Grok session." : "No Grok session is connected.";
+        providerState = state.providers || { grok: state.authenticated, gemini: false };
+        const connected = Object.entries(providerState).filter(([, value]) => value).map(([name]) => name === "grok" ? "Grok" : "Gemini");
+        $("#status").textContent = connected.length ? "Connected locally: " + connected.join(" and ") + "." : "No provider session is connected.";
         $("#connect").classList.toggle("hidden", state.authenticated);
         $("#logout").classList.toggle("hidden", !state.authenticated);
+        for (const option of $("#provider").options) option.disabled = !providerState[option.value];
+        if (!providerState[$("#provider").value]) $("#provider").value = connected[0]?.toLocaleLowerCase() || "grok";
         if (state.authenticated) await loadConversations();
       }
       function showProgress(progress) {
@@ -141,7 +149,7 @@
         bar.value = progress.current;
       }
       async function exportSelected(format) {
-        const response = await fetch("/api/export-stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [...selected], format }) });
+        const response = await fetch("/api/export-stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: $("#provider").value, ids: [...selected], format }) });
         if (!response.ok) {
           const data = await response.json();
           throw new Error(data.error);
@@ -168,10 +176,15 @@
         return result;
       }
       $("#logout").addEventListener("click", async () => {
-        await api("/api/logout", { method: "POST" });
+        await api("/api/logout?provider=" + encodeURIComponent($("#provider").value), { method: "POST" });
         selected.clear(); updateSelection(); $("#chats").classList.add("hidden"); await loadStatus();
       });
       $("#filter").addEventListener("input", applyFilter);
+      $("#provider").addEventListener("change", async () => {
+        try {
+          selected.clear(); updateSelection(); $("#result").replaceChildren(); await loadConversations();
+        } catch (error) { alert(error.message); }
+      });
       $("#refresh").addEventListener("click", () => loadConversations().catch((error) => alert(error.message)));
       document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
         const buttons = [...document.querySelectorAll("[data-format]")];

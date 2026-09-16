@@ -13,14 +13,15 @@ import (
 )
 
 func TestSaveSessionCreatesSharedSessionAndStatus(t *testing.T) {
-	app := &app{sessionPath: filepath.Join(t.TempDir(), "session.json"), exportDir: t.TempDir()}
+	sessionPath := filepath.Join(t.TempDir(), "session.json")
+	app := &app{sessionPaths: map[string]string{"grok": sessionPath}, clients: map[string]providerClient{}, exportDir: t.TempDir()}
 	request := httptest.NewRequest(http.MethodPost, "/api/session", bytes.NewBufferString(`{"cookies":[{"name":"sso","value":"private","domain":".grok.com"}]}`))
 	response := httptest.NewRecorder()
 	app.saveSession(response, request)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("save status %d: %s", response.Code, response.Body.String())
 	}
-	if _, err := store.Load(app.sessionPath); err != nil {
+	if _, err := store.Load(sessionPath); err != nil {
 		t.Fatalf("saved session unavailable: %v", err)
 	}
 	status := httptest.NewRecorder()
@@ -52,7 +53,7 @@ func TestTreeGroupsProjectAndUnfiledConversations(t *testing.T) {
 }
 
 func TestSessionBridgeRejectsCrossSiteOrigin(t *testing.T) {
-	a := &app{sessionPath: filepath.Join(t.TempDir(), "session.json")}
+	a := &app{sessionPaths: map[string]string{"grok": filepath.Join(t.TempDir(), "session.json")}, clients: map[string]providerClient{}}
 	request := httptest.NewRequest(http.MethodPost, "/api/session", bytes.NewBufferString(`{"cookies":[]}`))
 	request.Header.Set("Origin", "https://example.invalid")
 	response := httptest.NewRecorder()

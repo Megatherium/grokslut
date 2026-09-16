@@ -3,11 +3,13 @@
   "minimum_chrome_version": "102",
   "name": "grokslut session bridge",
   "version": "0.1.0",
-  "description": "Sends your current Grok browser session to the local grokslut exporter.",
+  "description": "Sends your current Grok or Gemini browser session to the local grokslut exporter.",
   "permissions": ["cookies", "storage", "webRequest"],
   "host_permissions": [
     "https://grok.com/*",
     "https://*.grok.com/*",
+    "https://gemini.google.com/*",
+    "https://*.google.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

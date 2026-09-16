@@ -11,6 +11,7 @@ import (
 
 	"github.com/Megatherium/grokslut/auth"
 	"github.com/Megatherium/grokslut/exporter"
+	"github.com/Megatherium/grokslut/gemini"
 	"github.com/Megatherium/grokslut/grok"
 	"github.com/Megatherium/grokslut/store"
 )
@@ -33,9 +34,9 @@ func run(args []string) error {
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	defaultSession, _ := store.DefaultSessionPath()
-	sessionPath := flags.String("session", defaultSession, "private session envelope JSON")
-	baseURL := flags.String("base-url", "https://grok.com", "override grok.com (for local test fixtures)")
+	provider := flags.String("provider", "grok", "history provider: grok or gemini")
+	sessionPath := flags.String("session", "", "private session envelope JSON (defaults per provider)")
+	baseURL := flags.String("base-url", "", "override provider base URL (for local test fixtures)")
 	pageSize := flags.Int("page-size", 60, "conversation page size")
 	cursor := flags.String("cursor", "", "pagination cursor")
 	all := flags.Bool("all", false, "fetch every page")
@@ -48,11 +49,29 @@ func run(args []string) error {
 	if command != "list" && command != "verify" && command != "export" {
 		return fmt.Errorf("unknown command %q", command)
 	}
+	if *provider != "grok" && *provider != "gemini" {
+		return fmt.Errorf("provider must be grok or gemini")
+	}
+	if *sessionPath == "" {
+		*sessionPath, _ = store.DefaultProviderSessionPath(*provider)
+	}
+	if *baseURL == "" {
+		if *provider == "gemini" {
+			*baseURL = "https://gemini.google.com"
+		} else {
+			*baseURL = "https://grok.com"
+		}
+	}
 	session, err := auth.FromFile(*sessionPath)
 	if err != nil {
 		return err
 	}
-	client, err := grok.NewClient(session, *baseURL)
+	var client commandClient
+	if *provider == "gemini" {
+		client, err = gemini.NewClient(session, *baseURL)
+	} else {
+		client, err = grok.NewClient(session, *baseURL)
+	}
 	if err != nil {
 		return err
 	}
@@ -96,6 +115,13 @@ func run(args []string) error {
 	return nil
 }
 
+type commandClient interface {
+	exporter.HistoryClient
+	Verify() error
+	ListConversations(int, string) (grok.ListResult, error)
+	ListAllConversations(int) ([]grok.ConversationSummary, error)
+}
+
 func printJSON(value any) error {
 	output, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -105,12 +131,12 @@ func printJSON(value any) error {
 	return err
 }
 func help() {
-	fmt.Print(`grokslut — personal Grok conversation exporter
+	fmt.Print(`grokslut — personal Grok and Gemini conversation exporter
 
 Usage:
-  grokslut verify --session session.json
-  grokslut list --session session.json [--all] [--page-size 60]
-  grokslut export --session session.json --ids ID,ID --format markdown|json|zip --out exports
+  grokslut verify [--provider grok|gemini] [--session session.json]
+  grokslut list [--provider grok|gemini] [--all] [--page-size 60]
+  grokslut export [--provider grok|gemini] --ids ID,ID --format markdown|json|zip --out exports
 
 The session envelope is private: it is not logged or persisted by the CLI.
 `)

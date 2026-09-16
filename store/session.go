@@ -11,11 +11,19 @@ import (
 )
 
 func DefaultSessionPath() (string, error) {
+	return DefaultProviderSessionPath("grok")
+}
+
+func DefaultProviderSessionPath(provider string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "grokslut", "session.json"), nil
+	name := "session.json"
+	if provider != "" && provider != "grok" {
+		name = "session-" + provider + ".json"
+	}
+	return filepath.Join(dir, "grokslut", name), nil
 }
 
 func Load(path string) (auth.Session, error) { return auth.FromFile(path) }

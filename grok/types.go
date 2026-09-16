@@ -3,6 +3,7 @@ package grok
 import "encoding/json"
 
 type ConversationSummary struct {
+	Provider     string          `json:"provider,omitempty"`
 	ID           string          `json:"id"`
 	Title        string          `json:"title"`
 	CreatedAt    string          `json:"createdAt,omitempty"`
