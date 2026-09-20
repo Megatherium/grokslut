@@ -5,6 +5,7 @@ package grok
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +20,14 @@ import (
 	"github.com/Megatherium/grokslut/auth"
 )
 
-var ErrAuthExpired = errors.New("Grok session expired or was rejected; sign in again and refresh the session")
+var ErrAuthExpired = errors.New("grok session expired or was rejected; sign in again and refresh the session")
 
 type HTTPError struct {
 	Status int
 	Body   string
 }
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("Grok request failed (HTTP %d)", e.Status) }
+func (e *HTTPError) Error() string { return fmt.Sprintf("grok request failed (HTTP %d)", e.Status) }
 
 type Client struct {
 	BaseURL *url.URL
@@ -72,9 +73,18 @@ func NewClient(session auth.Session, baseURL string) (*Client, error) {
 	return &Client{BaseURL: base, HTTP: httpClient, Headers: headers, Retries: 3}, nil
 }
 
-func (c *Client) Verify() error { _, err := c.ListConversations(1, ""); return err }
+func (c *Client) Verify() error { return c.VerifyContext(context.Background()) }
+
+func (c *Client) VerifyContext(ctx context.Context) error {
+	_, err := c.ListConversationsContext(ctx, 1, "")
+	return err
+}
 
 func (c *Client) ListConversations(pageSize int, cursor string) (ListResult, error) {
+	return c.ListConversationsContext(context.Background(), pageSize, cursor)
+}
+
+func (c *Client) ListConversationsContext(ctx context.Context, pageSize int, cursor string) (ListResult, error) {
 	if pageSize < 1 {
 		pageSize = 60
 	}
@@ -85,7 +95,7 @@ func (c *Client) ListConversations(pageSize int, cursor string) (ListResult, err
 	if cursor != "" {
 		query.Set("cursor", cursor)
 	}
-	raw, err := c.request(http.MethodGet, "/rest/app-chat/conversations?"+query.Encode(), nil)
+	raw, err := c.requestContext(ctx, http.MethodGet, "/rest/app-chat/conversations?"+query.Encode(), nil)
 	if err != nil {
 		return ListResult{}, err
 	}
@@ -93,14 +103,25 @@ func (c *Client) ListConversations(pageSize int, cursor string) (ListResult, err
 }
 
 func (c *Client) ListAllConversations(pageSize int) ([]ConversationSummary, error) {
+	return c.ListAllConversationsContext(context.Background(), pageSize)
+}
+
+func (c *Client) ListAllConversationsContext(ctx context.Context, pageSize int) ([]ConversationSummary, error) {
 	var all []ConversationSummary
+	seen := map[string]bool{}
 	cursor := ""
 	for page := 0; page < 100; page++ {
-		result, err := c.ListConversations(pageSize, cursor)
+		result, err := c.ListConversationsContext(ctx, pageSize, cursor)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, result.Conversations...)
+		for _, conversation := range result.Conversations {
+			if conversation.ID == "" || seen[conversation.ID] {
+				continue
+			}
+			seen[conversation.ID] = true
+			all = append(all, conversation)
+		}
 		if result.NextCursor == "" || result.NextCursor == cursor {
 			return all, nil
 		}
@@ -112,18 +133,26 @@ func (c *Client) ListAllConversations(pageSize int) ([]ConversationSummary, erro
 type LoadProgress func(loaded, total int)
 
 func (c *Client) LoadConversation(id string) (Thread, error) {
-	return c.LoadConversationProgress(id, nil)
+	return c.LoadConversationContext(context.Background(), id)
+}
+
+func (c *Client) LoadConversationContext(ctx context.Context, id string) (Thread, error) {
+	return c.LoadConversationProgressContext(ctx, id, nil)
 }
 
 // LoadConversationProgress hydrates every response named by Grok's node index,
 // then follows unresolved parent links until the complete ancestry is loaded.
 // This bypasses the web UI's progressive scroll-based hydration.
 func (c *Client) LoadConversationProgress(id string, progress LoadProgress) (Thread, error) {
+	return c.LoadConversationProgressContext(context.Background(), id, progress)
+}
+
+func (c *Client) LoadConversationProgressContext(ctx context.Context, id string, progress LoadProgress) (Thread, error) {
 	if id == "" {
 		return Thread{}, errors.New("conversation id is required")
 	}
 	safeID := url.PathEscape(id)
-	nodes, err := c.request(http.MethodGet, "/rest/app-chat/conversations/"+safeID+"/response-node?includeThreads=true", nil)
+	nodes, err := c.requestContext(ctx, http.MethodGet, "/rest/app-chat/conversations/"+safeID+"/response-node?includeThreads=true", nil)
 	if err != nil {
 		return Thread{}, err
 	}
@@ -139,8 +168,11 @@ func (c *Client) LoadConversationProgress(id string, progress LoadProgress) (Thr
 			for _, responseID := range batch {
 				attempted[responseID] = true
 			}
-			payload, _ := json.Marshal(map[string][]string{"responseIds": batch})
-			raw, err := c.request(http.MethodPost, "/rest/app-chat/conversations/"+safeID+"/load-responses", payload)
+			payload, err := json.Marshal(map[string][]string{"responseIds": batch})
+			if err != nil {
+				return err
+			}
+			raw, err := c.requestContext(ctx, http.MethodPost, "/rest/app-chat/conversations/"+safeID+"/load-responses", payload)
 			if err != nil {
 				return err
 			}
@@ -192,7 +224,7 @@ func (c *Client) LoadConversationProgress(id string, progress LoadProgress) (Thr
 		}
 	}
 	if unresolved = unique(unresolved); len(unresolved) > 0 {
-		return Thread{}, fmt.Errorf("Grok did not return %d referenced ancestor response(s)", len(unresolved))
+		return Thread{}, fmt.Errorf("grok did not return %d referenced ancestor response(s)", len(unresolved))
 	}
 	return thread, nil
 }
@@ -213,11 +245,15 @@ func responseString(raw json.RawMessage, keys ...string) string {
 
 // GetMedia downloads an asset with the same session and browser headers.
 func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
+	return c.GetMediaContext(context.Background(), assetURL)
+}
+
+func (c *Client) GetMediaContext(ctx context.Context, assetURL string) (*http.Response, error) {
 	asset, err := url.Parse(assetURL)
 	if err != nil || (asset.Scheme != "http" && asset.Scheme != "https") || asset.Hostname() == "" {
 		return nil, fmt.Errorf("invalid media URL")
 	}
-	req, err := http.NewRequest(http.MethodGet, asset.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,11 +267,11 @@ func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
 		return nil, err
 	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		response.Body.Close()
+		_ = response.Body.Close()
 		return nil, ErrAuthExpired
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		response.Body.Close()
+		_ = response.Body.Close()
 		return nil, &HTTPError{Status: response.StatusCode}
 	}
 	return response, nil
@@ -268,13 +304,13 @@ func stripSessionHeaders(destination, session http.Header) {
 	}
 }
 
-func (c *Client) request(method, path string, body []byte) ([]byte, error) {
+func (c *Client) requestContext(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	endpoint, err := c.BaseURL.Parse(path)
 	if err != nil {
 		return nil, err
 	}
 	for attempt := 0; attempt <= c.Retries; attempt++ {
-		req, err := http.NewRequest(method, endpoint.String(), bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -287,13 +323,18 @@ func (c *Client) request(method, path string, body []byte) ([]byte, error) {
 		}
 		response, err := c.HTTP.Do(req)
 		if err == nil {
-			data, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<20))
-			response.Body.Close()
+			if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+				_ = response.Body.Close()
+				return nil, ErrAuthExpired
+			}
+			if response.ContentLength > 16<<20 {
+				_ = response.Body.Close()
+				return nil, fmt.Errorf("grok response exceeds 16 MiB limit")
+			}
+			data, readErr := readLimited(response.Body, 16<<20, "grok response")
+			_ = response.Body.Close()
 			if readErr != nil {
 				return nil, readErr
-			}
-			if response.StatusCode == 401 || response.StatusCode == 403 {
-				return nil, ErrAuthExpired
 			}
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
 				return data, nil
@@ -301,15 +342,44 @@ func (c *Client) request(method, path string, body []byte) ([]byte, error) {
 			if !retryable(response.StatusCode) || attempt == c.Retries {
 				return nil, &HTTPError{Status: response.StatusCode, Body: string(data[:min(len(data), 500)])}
 			}
-			time.Sleep(retryAfter(response, attempt))
+			if err := waitForRetry(ctx, retryAfter(response, attempt)); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		if attempt == c.Retries {
-			return nil, fmt.Errorf("Grok request failed after retries: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		time.Sleep(time.Duration(1<<attempt) * 500 * time.Millisecond)
+		if attempt == c.Retries {
+			return nil, fmt.Errorf("grok request failed after retries: %w", err)
+		}
+		if err := waitForRetry(ctx, time.Duration(1<<attempt)*500*time.Millisecond); err != nil {
+			return nil, err
+		}
 	}
 	return nil, errors.New("unreachable")
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func readLimited(reader io.Reader, limit int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d MiB limit", label, limit>>20)
+	}
+	return data, nil
 }
 
 func decodeList(raw []byte) (ListResult, error) {

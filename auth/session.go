@@ -70,6 +70,12 @@ func FromFile(name string) (Session, error) {
 }
 
 func (s Session) Apply(client *http.Client, baseURL string) error {
+	if client == nil {
+		return fmt.Errorf("http client is required")
+	}
+	if client.Jar == nil {
+		return fmt.Errorf("http client needs a cookie jar")
+	}
 	base, err := url.Parse(baseURL)
 	if err != nil {
 		return err
@@ -87,7 +93,8 @@ func (s Session) Apply(client *http.Client, baseURL string) error {
 		if host, _, found := strings.Cut(cookieHost, ":"); found {
 			cookieHost = host
 		}
-		if cookieHost != baseHost && !strings.HasSuffix(baseHost, "."+cookieHost) {
+		parentDomain := strings.Contains(cookieHost, ".") && strings.HasSuffix(baseHost, "."+cookieHost)
+		if cookieHost != baseHost && !parentDomain {
 			return fmt.Errorf("cookie domain %q does not match %s", cookie.Domain, baseHost)
 		}
 		target := *base

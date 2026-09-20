@@ -4,6 +4,7 @@ package exporter
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,9 +15,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Megatherium/grokslut/grok"
 )
@@ -47,22 +50,34 @@ type HistoryClient interface {
 	GetMedia(string) (*http.Response, error)
 }
 
+type contextHistoryClient interface {
+	LoadConversationProgressContext(context.Context, string, grok.LoadProgress) (grok.Thread, error)
+	GetMediaContext(context.Context, string) (*http.Response, error)
+}
+
 type Exporter struct{ Client HistoryClient }
 
 func (e Exporter) Export(ids []string, format Format, outDir string, progress ProgressFunc) (Result, error) {
+	return e.ExportContext(context.Background(), ids, format, outDir, progress)
+}
+
+func (e Exporter) ExportContext(ctx context.Context, ids []string, format Format, outDir string, progress ProgressFunc) (Result, error) {
 	if len(ids) == 0 {
 		return Result{}, fmt.Errorf("select at least one conversation")
 	}
 	if format != Markdown && format != JSON && format != RawJSON && format != ZIP {
 		return Result{}, fmt.Errorf("format must be markdown, json, raw-json, or zip")
 	}
-	if err := os.MkdirAll(outDir, 0755); err != nil {
+	if err := os.MkdirAll(outDir, 0700); err != nil {
 		return Result{}, err
 	}
 	threads := make([]grok.Thread, 0, len(ids))
 	for index, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		notify(progress, Progress{Phase: "loading", Current: index + 1, Total: len(ids), ID: id})
-		thread, err := e.Client.LoadConversationProgress(id, func(loaded, total int) {
+		thread, err := e.loadConversation(ctx, id, func(loaded, total int) {
 			notify(progress, Progress{Phase: "responses", Current: loaded, Total: total, ID: id})
 		})
 		if err != nil {
@@ -71,15 +86,18 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 		threads = append(threads, thread)
 	}
 	if format == ZIP {
-		return e.writeZIP(threads, outDir, progress)
+		return e.writeZIP(ctx, threads, outDir, progress)
 	}
 	result := Result{}
 	for index, thread := range threads {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		directory, err := uniqueDir(outDir, SafeName(thread.Conversation.Title))
 		if err != nil {
 			return Result{}, err
 		}
-		files, warnings, err := e.writeDirectory(thread, directory, format)
+		files, warnings, err := e.writeDirectory(ctx, thread, directory, format)
 		if err != nil {
 			return Result{}, err
 		}
@@ -90,23 +108,53 @@ func (e Exporter) Export(ids []string, format Format, outDir string, progress Pr
 	return result, nil
 }
 
-func (e Exporter) writeZIP(threads []grok.Thread, outDir string, progress ProgressFunc) (Result, error) {
-	name := filepath.Join(outDir, "grokslut-export-"+time.Now().UTC().Format("20060102T150405Z")+".zip")
-	file, err := os.Create(name)
+func (e Exporter) loadConversation(ctx context.Context, id string, progress grok.LoadProgress) (grok.Thread, error) {
+	if client, ok := e.Client.(contextHistoryClient); ok {
+		return client.LoadConversationProgressContext(ctx, id, progress)
+	}
+	return e.Client.LoadConversationProgress(id, progress)
+}
+
+func (e Exporter) getMedia(ctx context.Context, assetURL string) (*http.Response, error) {
+	if client, ok := e.Client.(contextHistoryClient); ok {
+		return client.GetMediaContext(ctx, assetURL)
+	}
+	return e.Client.GetMedia(assetURL)
+}
+
+func (e Exporter) writeZIP(ctx context.Context, threads []grok.Thread, outDir string, progress ProgressFunc) (Result, error) {
+	base := "grokslut-export-" + time.Now().UTC().Format("20060102T150405Z")
+	file, name, err := createUniqueFile(outDir, base, ".zip")
 	if err != nil {
 		return Result{}, err
 	}
 	zipWriter := zip.NewWriter(file)
 	result := Result{Paths: []string{name}}
-	defer func() { zipWriter.Close(); file.Close() }()
+	complete := false
+	defer func() {
+		if !complete {
+			_ = zipWriter.Close()
+			_ = file.Close()
+			_ = os.Remove(name)
+		}
+	}()
+	usedPrefixes := map[string]bool{}
 	for index, thread := range threads {
-		prefix := SafeName(thread.Conversation.Title) + "/"
-		media, warnings := e.downloadMedia(thread.Responses)
-		result.Warnings = append(result.Warnings, warnings...)
-		if err := zipText(zipWriter, prefix+SafeName(thread.Conversation.Title)+".md", RenderMarkdown(thread, media.replacements)); err != nil {
+		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		if err := zipJSON(zipWriter, prefix+SafeName(thread.Conversation.Title)+".json", thread, false); err != nil {
+		title := SafeName(thread.Conversation.Title)
+		prefixName := uniqueName(title, usedPrefixes)
+		prefix := prefixName + "/"
+		media, warnings := e.downloadMedia(ctx, thread.Responses)
+		result.Warnings = append(result.Warnings, warnings...)
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		if err := zipText(zipWriter, prefix+title+".md", RenderMarkdown(thread, media.replacements)); err != nil {
+			return Result{}, err
+		}
+		if err := zipJSON(zipWriter, prefix+title+".json", thread, false); err != nil {
 			return Result{}, err
 		}
 		for _, item := range media.items {
@@ -117,22 +165,25 @@ func (e Exporter) writeZIP(threads []grok.Thread, outDir string, progress Progre
 		notify(progress, Progress{Phase: "writing", Current: index + 1, Total: len(threads), ID: thread.Conversation.ID})
 	}
 	if err := zipWriter.Close(); err != nil {
-		file.Close()
 		return Result{}, err
 	}
 	if err := file.Close(); err != nil {
 		return Result{}, err
 	}
+	complete = true
 	return result, nil
 }
 
-func (e Exporter) writeDirectory(thread grok.Thread, directory string, format Format) ([]string, []string, error) {
-	media, warnings := e.downloadMedia(thread.Responses)
+func (e Exporter) writeDirectory(ctx context.Context, thread grok.Thread, directory string, format Format) ([]string, []string, error) {
+	media, warnings := e.downloadMedia(ctx, thread.Responses)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	var paths []string
 	base := SafeName(thread.Conversation.Title)
 	if format == Markdown {
 		target := filepath.Join(directory, base+".md")
-		if err := os.WriteFile(target, []byte(RenderMarkdown(thread, media.replacements)), 0644); err != nil {
+		if err := os.WriteFile(target, []byte(RenderMarkdown(thread, media.replacements)), 0600); err != nil {
 			return nil, nil, err
 		}
 		paths = append(paths, target)
@@ -150,10 +201,10 @@ func (e Exporter) writeDirectory(thread grok.Thread, directory string, format Fo
 	}
 	for _, item := range media.items {
 		target := filepath.Join(directory, "media", item.Name)
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			return nil, nil, err
 		}
-		if err := os.WriteFile(target, item.Data, 0644); err != nil {
+		if err := os.WriteFile(target, item.Data, 0600); err != nil {
 			return nil, nil, err
 		}
 		paths = append(paths, target)
@@ -170,23 +221,34 @@ type mediaItem struct {
 	Data []byte
 }
 
-func (e Exporter) downloadMedia(responses []json.RawMessage) (downloadedMedia, []string) {
+func (e Exporter) downloadMedia(ctx context.Context, responses []json.RawMessage) (downloadedMedia, []string) {
 	result := downloadedMedia{replacements: map[string]string{}}
 	var warnings []string
 	seen := map[string]bool{}
 	for _, raw := range responses {
+		if ctx.Err() != nil {
+			break
+		}
 		for _, assetURL := range MediaURLs(raw) {
+			if ctx.Err() != nil {
+				return result, warnings
+			}
 			if seen[assetURL] {
 				continue
 			}
 			seen[assetURL] = true
-			response, err := e.Client.GetMedia(assetURL)
+			response, err := e.getMedia(ctx, assetURL)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("could not download media %s: %v", redactURL(assetURL), err))
 				continue
 			}
-			data, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<20))
-			response.Body.Close()
+			if response.ContentLength > 64<<20 {
+				_ = response.Body.Close()
+				warnings = append(warnings, fmt.Sprintf("could not download media %s: media exceeds 64 MiB limit", redactURL(assetURL)))
+				continue
+			}
+			data, readErr := readLimited(response.Body, 64<<20, "media")
+			_ = response.Body.Close()
 			if readErr != nil {
 				warnings = append(warnings, fmt.Sprintf("could not download media %s: %v", redactURL(assetURL), readErr))
 				continue
@@ -203,7 +265,7 @@ func RenderMarkdown(thread grok.Thread, replacements map[string]string) string {
 	conversation := thread.Conversation
 	lines := []string{"---", "id: " + quote(conversation.ID), "title: " + quote(conversation.Title), "created_at: " + quote(conversation.CreatedAt), "updated_at: " + quote(conversation.UpdatedAt), "---", "", "# " + conversation.Title, ""}
 	responses := append([]json.RawMessage(nil), thread.Responses...)
-	sort.SliceStable(responses, func(i, j int) bool { return responseTime(responses[i]) < responseTime(responses[j]) })
+	sortResponses(responses)
 	for _, raw := range responses {
 		author, id, parent, body := responseFields(raw)
 		for remote, local := range replacements {
@@ -252,7 +314,10 @@ func MediaURLs(raw json.RawMessage) []string {
 	return result
 }
 
-var mediaKey = regexp.MustCompile(`(?i)(generatedImageUrls|imageUrls|assetUrls|attachments?|media)`)
+var (
+	mediaKey      = regexp.MustCompile(`(?i)^(generatedImageUrls|imageUrls|assetUrls|attachments?|media)$`)
+	fileExtension = regexp.MustCompile(`^\.[A-Za-z0-9]{1,5}$`)
+)
 
 func responseFields(raw json.RawMessage) (author, id, parent, body string) {
 	var object map[string]any
@@ -261,7 +326,7 @@ func responseFields(raw json.RawMessage) (author, id, parent, body string) {
 	if nested, ok := object["author"].(map[string]any); ok {
 		author = stringAt(nested, "role", "name")
 	}
-	author = strings.Title(defaultString(author, "unknown"))
+	author = authorLabel(defaultString(author, "unknown"))
 	id = stringAt(object, "id", "responseId")
 	parent = stringAt(object, "parentResponseId", "parentId", "parent_id")
 	body = contentAt(object)
@@ -310,6 +375,47 @@ func responseTime(raw json.RawMessage) string {
 	_ = json.Unmarshal(raw, &object)
 	return stringAt(object, "createTime", "createdAt", "created_at", "timestamp")
 }
+func authorLabel(author string) string {
+	switch strings.ToLower(author) {
+	case "assistant":
+		return "Assistant"
+	case "human":
+		return "Human"
+	case "user":
+		return "User"
+	case "system":
+		return "System"
+	case "unknown":
+		return "Unknown"
+	default:
+		return author
+	}
+}
+
+func sortResponses(responses []json.RawMessage) {
+	sort.SliceStable(responses, func(i, j int) bool {
+		leftRaw, rightRaw := responseTime(responses[i]), responseTime(responses[j])
+		left, leftOK := parseResponseTime(leftRaw)
+		right, rightOK := parseResponseTime(rightRaw)
+		if leftOK && rightOK {
+			return left.Before(right)
+		}
+		if leftOK != rightOK {
+			return leftOK
+		}
+		return leftRaw < rightRaw
+	})
+}
+
+func parseResponseTime(value string) (time.Time, bool) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, true
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.Unix(seconds, 0).UTC(), true
+	}
+	return time.Time{}, false
+}
 func defaultString(value, fallback string) string {
 	if value == "" {
 		return fallback
@@ -323,7 +429,7 @@ func writeThreadJSON(target string, thread grok.Thread, raw bool) error {
 	if err := encodeThread(&buffer, thread, raw); err != nil {
 		return err
 	}
-	return os.WriteFile(target, buffer.Bytes(), 0644)
+	return os.WriteFile(target, buffer.Bytes(), 0600)
 }
 func zipText(writer *zip.Writer, name, value string) error {
 	return zipBytes(writer, name, []byte(value))
@@ -349,7 +455,11 @@ func encodeThread(writer io.Writer, thread grok.Thread, raw bool) error {
 	}
 	conversation := thread.Conversation.Raw
 	if len(conversation) == 0 {
-		conversation, _ = json.Marshal(thread.Conversation)
+		var err error
+		conversation, err = json.Marshal(thread.Conversation)
+		if err != nil {
+			return err
+		}
 	}
 	_, err := writer.Write([]byte(`{"conversation":`))
 	if err != nil {
@@ -395,7 +505,7 @@ func encodeNormalizedThread(writer io.Writer, thread grok.Thread) error {
 	conversation := thread.Conversation
 	conversation.Provider = provider
 	responses := append([]json.RawMessage(nil), thread.Responses...)
-	sort.SliceStable(responses, func(i, j int) bool { return responseTime(responses[i]) < responseTime(responses[j]) })
+	sortResponses(responses)
 	normalized := normalizedThread{Conversation: conversation, Responses: make([]normalizedResponse, 0, len(responses))}
 	for _, raw := range responses {
 		author, id, parent, message := responseFields(raw)
@@ -444,6 +554,9 @@ func SafeName(value string) string {
 	result := strings.Trim(strings.TrimSpace(builder.String()), ". ")
 	if len(result) > 80 {
 		result = result[:80]
+		for !utf8.ValidString(result) {
+			result = result[:len(result)-1]
+		}
 	}
 	return defaultString(result, "conversation")
 }
@@ -454,7 +567,7 @@ func uniqueDir(parent, name string) (string, error) {
 			suffix = fmt.Sprintf("-%d", index)
 		}
 		target := filepath.Join(parent, name+suffix)
-		if err := os.Mkdir(target, 0755); err == nil {
+		if err := os.Mkdir(target, 0700); err == nil {
 			return target, nil
 		} else if !os.IsExist(err) {
 			return "", err
@@ -477,10 +590,51 @@ func extension(contentType, source string) string {
 		}
 	}
 	ext := filepath.Ext(fileStem(source))
-	if regexp.MustCompile(`^\.[A-Za-z0-9]{1,5}$`).MatchString(ext) {
+	if fileExtension.MatchString(ext) {
 		return ext
 	}
 	return ""
+}
+
+func uniqueName(base string, used map[string]bool) string {
+	for index := 1; ; index++ {
+		candidate := base
+		if index > 1 {
+			candidate = fmt.Sprintf("%s-%d", base, index)
+		}
+		if !used[candidate] {
+			used[candidate] = true
+			return candidate
+		}
+	}
+}
+
+func createUniqueFile(directory, base, extension string) (*os.File, string, error) {
+	for index := 1; ; index++ {
+		name := base + extension
+		if index > 1 {
+			name = fmt.Sprintf("%s-%d%s", base, index, extension)
+		}
+		path := filepath.Join(directory, name)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return file, path, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+}
+
+func readLimited(reader io.Reader, limit int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d MiB limit", label, limit>>20)
+	}
+	return data, nil
 }
 func fileStem(source string) string {
 	parsed, err := url.Parse(source)

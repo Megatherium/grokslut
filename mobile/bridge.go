@@ -63,10 +63,17 @@ func LoadConversation(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	conversation := thread.Conversation.Raw
+	if len(conversation) == 0 {
+		conversation, err = json.Marshal(thread.Conversation)
+		if err != nil {
+			return "", err
+		}
+	}
 	data, err := json.Marshal(struct {
 		Conversation json.RawMessage   `json:"conversation"`
 		Responses    []json.RawMessage `json:"responses"`
-	}{thread.Conversation.Raw, thread.Responses})
+	}{conversation, thread.Responses})
 	return string(data), err
 }
 
