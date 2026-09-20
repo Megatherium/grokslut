@@ -6,6 +6,7 @@ const capturedHeaderNames = new Set([
   "user-agent",
   "accept-language",
 ]);
+const capturedHeaderMaxAge = 5 * 60 * 1000;
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
@@ -18,9 +19,24 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }
     if (Object.keys(headers).length) {
       const key = details.url.startsWith("https://gemini.google.com/") ? "geminiHeaders" : "grokHeaders";
-      chrome.storage.session.get(key).then((stored) =>
-        chrome.storage.session.set({ [key]: { ...(stored[key] || {}), ...headers } }),
-      );
+      const timestampsKey = `${key}CapturedAt`;
+      const now = Date.now();
+      chrome.storage.session.get([key, timestampsKey]).then((stored) => {
+        const merged = {};
+        const timestamps = {};
+        for (const [name, value] of Object.entries(stored[key] || {})) {
+          const capturedAt = (stored[timestampsKey] || {})[name] || 0;
+          if (now - capturedAt <= capturedHeaderMaxAge) {
+            merged[name] = value;
+            timestamps[name] = capturedAt;
+          }
+        }
+        for (const [name, value] of Object.entries(headers)) {
+          merged[name] = value;
+          timestamps[name] = now;
+        }
+        return chrome.storage.session.set({ [key]: merged, [timestampsKey]: timestamps });
+      });
     }
   },
   { urls: ["https://grok.com/rest/app-chat/*", "https://gemini.google.com/_/BardChatUi/data/*"] },

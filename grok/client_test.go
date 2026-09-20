@@ -1,12 +1,14 @@
 package grok_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Megatherium/grokslut/auth"
 	"github.com/Megatherium/grokslut/grok"
@@ -23,7 +25,7 @@ func TestClientListsAndLoadsUsingSessionCookie(t *testing.T) {
 			var body struct {
 				ResponseIDs []string `json:"responseIds"`
 			}
-			json.NewDecoder(request.Body).Decode(&body)
+			_ = json.NewDecoder(request.Body).Decode(&body)
 			responses := make([]map[string]string, 0, len(body.ResponseIDs))
 			for _, id := range body.ResponseIDs {
 				responses = append(responses, map[string]string{"id": id, "author": "assistant", "content": id})
@@ -69,7 +71,7 @@ func TestLoadConversationFollowsMissingParentChain(t *testing.T) {
 			var body struct {
 				ResponseIDs []string `json:"responseIds"`
 			}
-			json.NewDecoder(request.Body).Decode(&body)
+			_ = json.NewDecoder(request.Body).Decode(&body)
 			loads = append(loads, body.ResponseIDs)
 			responses := make([]map[string]string, 0, len(body.ResponseIDs))
 			for _, id := range body.ResponseIDs {
@@ -117,7 +119,7 @@ func TestLoadConversationRejectsUnresolvedParent(t *testing.T) {
 			var body struct {
 				ResponseIDs []string `json:"responseIds"`
 			}
-			json.NewDecoder(request.Body).Decode(&body)
+			_ = json.NewDecoder(request.Body).Decode(&body)
 			if len(body.ResponseIDs) > 0 && body.ResponseIDs[0] == "child" {
 				writeJSON(writer, map[string]any{"responses": []any{map[string]string{"responseId": "child", "parentResponseId": "missing"}}})
 				return
@@ -137,7 +139,8 @@ func TestLoadConversationRejectsUnresolvedParent(t *testing.T) {
 
 func TestAuthFailureIsTyped(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		http.Error(writer, "no", http.StatusUnauthorized)
+		writer.Header().Set("Content-Length", "16777217")
+		writer.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
 	if err := fixtureClient(t, server.URL).Verify(); err != grok.ErrAuthExpired {
@@ -149,7 +152,7 @@ func TestClientDoesNotLeakSessionHeadersAcrossOriginsOrRedirects(t *testing.T) {
 	var received []string
 	external := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		received = append(received, request.Header.Get("X-Challenge"))
-		writer.Write([]byte("media"))
+		_, _ = writer.Write([]byte("media"))
 	}))
 	defer external.Close()
 
@@ -158,7 +161,7 @@ func TestClientDoesNotLeakSessionHeadersAcrossOriginsOrRedirects(t *testing.T) {
 			http.Redirect(writer, request, external.URL+"/asset", http.StatusFound)
 			return
 		}
-		writer.Write([]byte("media"))
+		_, _ = writer.Write([]byte("media"))
 	}))
 	defer base.Close()
 
@@ -182,7 +185,7 @@ func TestClientDoesNotLeakSessionHeadersAcrossOriginsOrRedirects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response.Body.Close()
+		_ = response.Body.Close()
 	}
 	for _, value := range received {
 		if value != "" {
@@ -197,6 +200,64 @@ func TestClientRejectsCookieForUnrelatedDomain(t *testing.T) {
 	}, "https://grok.com")
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("expected domain mismatch, got %v", err)
+	}
+}
+
+func TestListAllConversationsDeduplicatesIDsAcrossPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("cursor") == "next" {
+			writeJSON(writer, map[string]any{"conversations": []any{
+				map[string]string{"id": "one", "title": "Repeated"},
+				map[string]string{"id": "two", "title": "Second"},
+			}})
+			return
+		}
+		writeJSON(writer, map[string]any{
+			"conversations": []any{map[string]string{"id": "one", "title": "First"}},
+			"nextCursor":    "next",
+		})
+	}))
+	defer server.Close()
+
+	conversations, err := fixtureClient(t, server.URL).ListAllConversations(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 2 || conversations[0].ID != "one" || conversations[1].ID != "two" {
+		t.Fatalf("unexpected conversations: %#v", conversations)
+	}
+}
+
+func TestOversizedResponseHasClearError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Length", "16777217")
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, err := fixtureClient(t, server.URL).ListConversations(1, "")
+	if err == nil || !strings.Contains(err.Error(), "exceeds 16 MiB") {
+		t.Fatalf("expected response-size error, got %v", err)
+	}
+}
+
+func TestContextCancelsRetryBackoff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Retry-After", "30")
+		http.Error(writer, "retry", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := fixtureClient(t, server.URL)
+	client.Retries = 3
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := client.ListConversationsContext(ctx, 1, "")
+	if err != context.DeadlineExceeded {
+		t.Fatalf("got %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancellation took %v", elapsed)
 	}
 }
 
@@ -217,5 +278,5 @@ func fixtureClient(t *testing.T, rawURL string) *grok.Client {
 
 func writeJSON(writer http.ResponseWriter, value any) {
 	writer.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(writer).Encode(value)
+	_ = json.NewEncoder(writer).Encode(value)
 }

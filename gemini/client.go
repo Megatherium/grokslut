@@ -4,6 +4,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,15 +75,23 @@ func NewClient(session auth.Session, baseURL string) (*Client, error) {
 }
 
 func (c *Client) Verify() error {
-	_, err := c.ListConversations(1, "")
+	return c.VerifyContext(context.Background())
+}
+
+func (c *Client) VerifyContext(ctx context.Context) error {
+	_, err := c.ListConversationsContext(ctx, 1, "")
 	return err
 }
 
 func (c *Client) ListConversations(pageSize int, cursor string) (grok.ListResult, error) {
-	return c.listConversations(pageSize, cursor, false)
+	return c.ListConversationsContext(context.Background(), pageSize, cursor)
 }
 
-func (c *Client) listConversations(pageSize int, cursor string, pinned bool) (grok.ListResult, error) {
+func (c *Client) ListConversationsContext(ctx context.Context, pageSize int, cursor string) (grok.ListResult, error) {
+	return c.listConversations(ctx, pageSize, cursor, false)
+}
+
+func (c *Client) listConversations(ctx context.Context, pageSize int, cursor string, pinned bool) (grok.ListResult, error) {
 	if pageSize < 1 {
 		pageSize = 36
 	}
@@ -97,7 +106,7 @@ func (c *Client) listConversations(pageSize int, cursor string, pinned bool) (gr
 	if pinned {
 		flag = 1
 	}
-	raw, err := c.call(listRPC, []any{pageSize, cursorValue, []any{flag, nil, 1}}, "/")
+	raw, err := c.call(ctx, listRPC, []any{pageSize, cursorValue, []any{flag, nil, 1}}, "/")
 	if err != nil {
 		return grok.ListResult{}, err
 	}
@@ -117,6 +126,10 @@ func (c *Client) listConversations(pageSize int, cursor string, pinned bool) (gr
 }
 
 func (c *Client) ListAllConversations(pageSize int) ([]grok.ConversationSummary, error) {
+	return c.ListAllConversationsContext(context.Background(), pageSize)
+}
+
+func (c *Client) ListAllConversationsContext(ctx context.Context, pageSize int) ([]grok.ConversationSummary, error) {
 	seen := map[string]bool{}
 	var all []grok.ConversationSummary
 	appendUnique := func(values []grok.ConversationSummary) {
@@ -131,7 +144,7 @@ func (c *Client) ListAllConversations(pageSize int) ([]grok.ConversationSummary,
 		cursor := ""
 		seenCursors := map[string]bool{}
 		for page := 0; page < 1000; page++ {
-			result, err := c.listConversations(pageSize, cursor, pinned)
+			result, err := c.listConversations(ctx, pageSize, cursor, pinned)
 			if err != nil {
 				return err
 			}
@@ -140,12 +153,12 @@ func (c *Client) ListAllConversations(pageSize int) ([]grok.ConversationSummary,
 				return nil
 			}
 			if result.NextCursor == cursor || seenCursors[result.NextCursor] {
-				return errors.New("Gemini returned a repeated conversation-list cursor")
+				return errors.New("gemini returned a repeated conversation-list cursor")
 			}
 			seenCursors[result.NextCursor] = true
 			cursor = result.NextCursor
 		}
-		return errors.New("Gemini conversation-list pagination exceeded 1000 pages")
+		return errors.New("gemini conversation-list pagination exceeded 1000 pages")
 	}
 	if err := walk(true); err != nil {
 		return nil, err
@@ -157,10 +170,18 @@ func (c *Client) ListAllConversations(pageSize int) ([]grok.ConversationSummary,
 }
 
 func (c *Client) LoadConversation(id string) (grok.Thread, error) {
-	return c.LoadConversationProgress(id, nil)
+	return c.LoadConversationContext(context.Background(), id)
+}
+
+func (c *Client) LoadConversationContext(ctx context.Context, id string) (grok.Thread, error) {
+	return c.LoadConversationProgressContext(ctx, id, nil)
 }
 
 func (c *Client) LoadConversationProgress(id string, progress grok.LoadProgress) (grok.Thread, error) {
+	return c.LoadConversationProgressContext(context.Background(), id, progress)
+}
+
+func (c *Client) LoadConversationProgressContext(ctx context.Context, id string, progress grok.LoadProgress) (grok.Thread, error) {
 	if id == "" {
 		return grok.Thread{}, errors.New("conversation id is required")
 	}
@@ -183,7 +204,7 @@ func (c *Client) LoadConversationProgress(id string, progress grok.LoadProgress)
 		if cursor != "" {
 			cursorValue = cursor
 		}
-		raw, err := c.call(loadRPC, []any{id, conversationPageSize, cursorValue, 1, []any{1}, []any{4}, nil, 1}, "/app/"+url.PathEscape(id))
+		raw, err := c.call(ctx, loadRPC, []any{id, conversationPageSize, cursorValue, 1, []any{1}, []any{4}, nil, 1}, "/app/"+url.PathEscape(id))
 		if err != nil {
 			return grok.Thread{}, err
 		}
@@ -202,24 +223,31 @@ func (c *Client) LoadConversationProgress(id string, progress grok.LoadProgress)
 			progress(loaded, total)
 		}
 		if nextCursor == "" {
-			thread.Nodes, _ = json.Marshal(pages)
+			thread.Nodes, err = json.Marshal(pages)
+			if err != nil {
+				return grok.Thread{}, err
+			}
 			return thread, nil
 		}
 		if nextCursor == cursor || seenCursors[nextCursor] {
-			return grok.Thread{}, errors.New("Gemini returned a repeated conversation cursor")
+			return grok.Thread{}, errors.New("gemini returned a repeated conversation cursor")
 		}
 		seenCursors[nextCursor] = true
 		cursor = nextCursor
 	}
-	return grok.Thread{}, errors.New("Gemini conversation pagination exceeded 10000 pages")
+	return grok.Thread{}, errors.New("gemini conversation pagination exceeded 10000 pages")
 }
 
 func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
+	return c.GetMediaContext(context.Background(), assetURL)
+}
+
+func (c *Client) GetMediaContext(ctx context.Context, assetURL string) (*http.Response, error) {
 	asset, err := url.Parse(assetURL)
 	if err != nil || (asset.Scheme != "http" && asset.Scheme != "https") || asset.Hostname() == "" {
 		return nil, errors.New("invalid media URL")
 	}
-	req, err := http.NewRequest(http.MethodGet, asset.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,23 +259,23 @@ func (c *Client) GetMedia(assetURL string) (*http.Response, error) {
 		return nil, err
 	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		response.Body.Close()
+		_ = response.Body.Close()
 		return nil, ErrAuthExpired
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		response.Body.Close()
+		_ = response.Body.Close()
 		return nil, &grok.HTTPError{Status: response.StatusCode}
 	}
 	return response, nil
 }
 
-func (c *Client) call(rpc string, args any, sourcePath string) (json.RawMessage, error) {
+func (c *Client) call(ctx context.Context, rpc string, args any, sourcePath string) (json.RawMessage, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		tokens, err := c.pageTokens()
+		tokens, err := c.pageTokens(ctx)
 		if err != nil {
 			return nil, err
 		}
-		payload, err := c.callWithTokens(rpc, args, sourcePath, tokens)
+		payload, err := c.callWithTokens(ctx, rpc, args, sourcePath, tokens)
 		if attempt == 0 && errors.Is(err, errInvalidBatchPayload) {
 			c.invalidatePageTokens(tokens)
 			continue
@@ -257,7 +285,7 @@ func (c *Client) call(rpc string, args any, sourcePath string) (json.RawMessage,
 	return nil, errInvalidBatchPayload
 }
 
-func (c *Client) callWithTokens(rpc string, args any, sourcePath string, tokens pageTokens) (json.RawMessage, error) {
+func (c *Client) callWithTokens(ctx context.Context, rpc string, args any, sourcePath string, tokens pageTokens) (json.RawMessage, error) {
 	inner, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -279,7 +307,7 @@ func (c *Client) callWithTokens(rpc string, args any, sourcePath string, tokens 
 	endpoint.Path = "/_/BardChatUi/data/batchexecute"
 	endpoint.RawQuery = query.Encode()
 	form := url.Values{"f.req": {string(envelope)}, "at": {tokens.At}}
-	req, err := http.NewRequest(http.MethodPost, endpoint.String(), strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -294,13 +322,16 @@ func (c *Client) callWithTokens(rpc string, args any, sourcePath string, tokens 
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<20))
-	if readErr != nil {
-		return nil, readErr
-	}
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return nil, ErrAuthExpired
+	}
+	if response.ContentLength > 64<<20 {
+		return nil, fmt.Errorf("gemini batch response exceeds 64 MiB limit")
+	}
+	body, readErr := readLimited(response.Body, 64<<20, "gemini batch response")
+	if readErr != nil {
+		return nil, readErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, &grok.HTTPError{Status: response.StatusCode, Body: string(body[:min(len(body), 500)])}
@@ -320,14 +351,14 @@ func (c *Client) invalidatePageTokens(used pageTokens) {
 	}
 }
 
-func (c *Client) pageTokens() (pageTokens, error) {
+func (c *Client) pageTokens(ctx context.Context) (pageTokens, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.tokens.At != "" && c.tokens.Build != "" && c.tokens.SID != "" {
 		return c.tokens, nil
 	}
 	endpoint := c.BaseURL.ResolveReference(&url.URL{Path: "/app"})
-	req, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return pageTokens{}, err
 	}
@@ -338,13 +369,16 @@ func (c *Client) pageTokens() (pageTokens, error) {
 	if err != nil {
 		return pageTokens{}, err
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return pageTokens{}, err
-	}
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return pageTokens{}, ErrAuthExpired
+	}
+	if response.ContentLength > 8<<20 {
+		return pageTokens{}, fmt.Errorf("gemini bootstrap response exceeds 8 MiB limit")
+	}
+	body, err := readLimited(response.Body, 8<<20, "gemini bootstrap response")
+	if err != nil {
+		return pageTokens{}, err
 	}
 	tokens := pageTokens{At: pageValue(body, "SNlM0e"), Build: pageValue(body, "cfb2h"), SID: pageValue(body, "FdrFJe")}
 	if tokens.At == "" || tokens.Build == "" || tokens.SID == "" {
@@ -352,6 +386,17 @@ func (c *Client) pageTokens() (pageTokens, error) {
 	}
 	c.tokens = tokens
 	return tokens, nil
+}
+
+func readLimited(reader io.Reader, limit int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d MiB limit", label, limit>>20)
+	}
+	return data, nil
 }
 
 func pageValue(body []byte, key string) string {

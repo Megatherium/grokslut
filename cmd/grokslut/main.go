@@ -53,7 +53,11 @@ func run(args []string) error {
 		return fmt.Errorf("provider must be grok or gemini")
 	}
 	if *sessionPath == "" {
-		*sessionPath, _ = store.DefaultProviderSessionPath(*provider)
+		var err error
+		*sessionPath, err = store.DefaultProviderSessionPath(*provider)
+		if err != nil {
+			return fmt.Errorf("resolve default session path: %w", err)
+		}
 	}
 	if *baseURL == "" {
 		if *provider == "gemini" {

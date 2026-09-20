@@ -37,7 +37,7 @@ async function sync(provider) {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `Exporter returned HTTP ${response.status}`);
-    await chrome.storage.session.remove(headerKey);
+    await chrome.storage.session.remove([headerKey, `${headerKey}CapturedAt`]);
     status.textContent = `${label} connected. Open the exporter to browse your conversations.`;
   } catch (error) {
     status.textContent = error.message.includes("Failed to fetch")

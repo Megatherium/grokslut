@@ -19,7 +19,7 @@ func TestClientListsAndFullyPaginatesHydratedConversation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/app":
-			fmt.Fprint(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf","cfb2h":"build","FdrFJe":"sid"};</script>`)
+			_, _ = fmt.Fprint(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf","cfb2h":"build","FdrFJe":"sid"};</script>`)
 		case "/_/BardChatUi/data/batchexecute":
 			if !strings.Contains(request.Header.Get("Cookie"), "gemini=test") {
 				t.Fatal("Gemini session cookie missing")
@@ -78,7 +78,18 @@ func TestClientListsAndFullyPaginatesHydratedConversation(t *testing.T) {
 
 func TestMissingGeminiBootstrapTokensIsAuthFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		fmt.Fprint(writer, "sign in")
+		_, _ = fmt.Fprint(writer, "sign in")
+	}))
+	defer server.Close()
+	if err := fixtureClient(t, server.URL).Verify(); err != gemini.ErrAuthExpired {
+		t.Fatalf("expected auth error, got %v", err)
+	}
+}
+
+func TestHTTPAuthFailureTakesPrecedenceOverSizeLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Length", "67108865")
+		writer.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
 	if err := fixtureClient(t, server.URL).Verify(); err != gemini.ErrAuthExpired {
@@ -93,14 +104,14 @@ func TestInvalidBatchEnvelopeRefreshesBootstrapTokensAndRetries(t *testing.T) {
 		switch request.URL.Path {
 		case "/app":
 			bootstrapCalls++
-			fmt.Fprintf(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf-%d","cfb2h":"build","FdrFJe":"sid"};</script>`, bootstrapCalls)
+			_, _ = fmt.Fprintf(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf-%d","cfb2h":"build","FdrFJe":"sid"};</script>`, bootstrapCalls)
 		case "/_/BardChatUi/data/batchexecute":
 			batchCalls++
 			if err := request.ParseForm(); err != nil {
 				t.Fatal(err)
 			}
 			if request.Form.Get("at") == "csrf-1" {
-				fmt.Fprint(writer, ")]}'\n\n17\n[[\"er\",null,401]]\n")
+				_, _ = fmt.Fprint(writer, ")]}'\n\n17\n[[\"er\",null,401]]\n")
 				return
 			}
 			batchResponse(writer, "MaZiqc", listPayload("", "fresh", "Fresh tokens"))
@@ -125,7 +136,7 @@ func TestInvalidBatchEnvelopeRefreshesBootstrapTokensAndRetries(t *testing.T) {
 func TestListAllConversationsExhaustsPinnedAndRegularCursors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/app" {
-			fmt.Fprint(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf","cfb2h":"build","FdrFJe":"sid"};</script>`)
+			_, _ = fmt.Fprint(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf","cfb2h":"build","FdrFJe":"sid"};</script>`)
 			return
 		}
 		if err := request.ParseForm(); err != nil {
@@ -193,7 +204,7 @@ func turn(conversationID, humanID, parentID, humanText, assistantID, assistantTe
 func batchResponse(writer http.ResponseWriter, rpc string, payload any) {
 	inner, _ := json.Marshal(payload)
 	outer, _ := json.Marshal([]any{[]any{"wrb.fr", rpc, string(inner), nil, nil, nil, "generic"}})
-	fmt.Fprintf(writer, ")]}'\n\n%d\n%s\n", len(outer), outer)
+	_, _ = fmt.Fprintf(writer, ")]}'\n\n%d\n%s\n", len(outer), outer)
 }
 
 func fixtureClient(t *testing.T, rawURL string) *gemini.Client {

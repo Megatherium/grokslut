@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,13 +35,17 @@ type app struct {
 	sessionPaths      map[string]string
 	conversationCache map[string][]project
 	exportDir         string
-	verify            func(string, providerClient) error
+	verify            func(context.Context, string, providerClient) error
 }
 type providerClient interface {
 	ListAllConversations(int) ([]grok.ConversationSummary, error)
 	LoadConversationProgress(string, grok.LoadProgress) (grok.Thread, error)
 	GetMedia(string) (*http.Response, error)
 	Verify() error
+}
+type contextProviderClient interface {
+	ListAllConversationsContext(context.Context, int) ([]grok.ConversationSummary, error)
+	VerifyContext(context.Context) error
 }
 type project struct {
 	ID            string                     `json:"id"`
@@ -52,8 +59,14 @@ type exportRequest struct {
 }
 
 func main() {
-	defaultSession, _ := store.DefaultSessionPath()
-	defaultGeminiSession, _ := store.DefaultProviderSessionPath("gemini")
+	defaultSession, err := store.DefaultSessionPath()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defaultGeminiSession, err := store.DefaultProviderSessionPath("gemini")
+	if err != nil {
+		log.Fatal(err)
+	}
 	address := flag.String("listen", "127.0.0.1:8787", "loopback address for the web UI")
 	sessionPath := flag.String("session", defaultSession, "shared Grok CLI session file")
 	geminiSessionPath := flag.String("gemini-session", defaultGeminiSession, "shared Gemini CLI session file")
@@ -67,7 +80,12 @@ func main() {
 		sessionPaths:      map[string]string{"grok": *sessionPath, "gemini": *geminiSessionPath},
 		conversationCache: map[string][]project{},
 		exportDir:         *exportDir,
-		verify:            func(_ string, client providerClient) error { return client.Verify() },
+		verify: func(ctx context.Context, _ string, client providerClient) error {
+			if contextual, ok := client.(contextProviderClient); ok {
+				return contextual.VerifyContext(ctx)
+			}
+			return client.Verify()
+		},
 	}
 	for _, provider := range []string{"grok", "gemini"} {
 		if session, err := store.Load(a.sessionPaths[provider]); err == nil {
@@ -85,7 +103,7 @@ func main() {
 	mux.HandleFunc("GET /api/conversations", a.conversations)
 	mux.HandleFunc("POST /api/export", a.export)
 	mux.HandleFunc("POST /api/export-stream", a.exportStream)
-	mux.Handle("GET /files/", http.StripPrefix("/files/", http.FileServer(http.Dir(a.exportDir))))
+	mux.HandleFunc("GET /files/", a.files)
 	server := &http.Server{Addr: *address, Handler: secureHeaders(mux)}
 	log.Printf("grokslut web UI listening at http://%s", *address)
 	log.Fatal(server.ListenAndServe())
@@ -111,7 +129,7 @@ func (a *app) saveSessionFor(provider string, writer http.ResponseWriter, reques
 		return
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, 1<<20)
-	defer request.Body.Close()
+	defer func() { _ = request.Body.Close() }()
 	raw, err := io.ReadAll(request.Body)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err)
@@ -128,7 +146,7 @@ func (a *app) saveSessionFor(provider string, writer http.ResponseWriter, reques
 		return
 	}
 	if a.verify != nil {
-		if err := a.verify(provider, client); err != nil {
+		if err := a.verify(request.Context(), provider, client); err != nil {
 			writeClientError(writer, err)
 			return
 		}
@@ -188,7 +206,13 @@ func (a *app) conversations(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
-	conversations, err := client.ListAllConversations(100)
+	var conversations []grok.ConversationSummary
+	var err error
+	if contextual, ok := client.(contextProviderClient); ok {
+		conversations, err = contextual.ListAllConversationsContext(request.Context(), 100)
+	} else {
+		conversations, err = client.ListAllConversations(100)
+	}
 	if err != nil {
 		writeClientError(writer, err)
 		return
@@ -221,7 +245,7 @@ func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
-	result, err := (exporter.Exporter{Client: client}).Export(input.IDs, input.Format, a.exportDir, nil)
+	result, err := (exporter.Exporter{Client: client}).ExportContext(request.Context(), input.IDs, input.Format, a.exportDir, nil)
 	if err != nil {
 		writeClientError(writer, err)
 		return
@@ -263,7 +287,7 @@ func (a *app) exportStream(writer http.ResponseWriter, request *http.Request) {
 			flusher.Flush()
 		}
 	}
-	result, err := (exporter.Exporter{Client: client}).Export(input.IDs, input.Format, a.exportDir, func(progress exporter.Progress) {
+	result, err := (exporter.Exporter{Client: client}).ExportContext(request.Context(), input.IDs, input.Format, a.exportDir, func(progress exporter.Progress) {
 		send(map[string]any{"type": "progress", "progress": progress})
 	})
 	if err != nil {
@@ -286,6 +310,34 @@ func (a *app) relativize(result *exporter.Result) error {
 		result.Paths[index] = filepath.ToSlash(relative)
 	}
 	return nil
+}
+func (a *app) files(writer http.ResponseWriter, request *http.Request) {
+	relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(request.URL.Path, "/files/")))
+	if relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		http.NotFound(writer, request)
+		return
+	}
+	root, err := filepath.EvalSymlinks(a.exportDir)
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(root, relative))
+	if err != nil {
+		http.NotFound(writer, request)
+		return
+	}
+	withinRoot, err := filepath.Rel(root, target)
+	if err != nil || withinRoot == ".." || strings.HasPrefix(withinRoot, ".."+string(filepath.Separator)) {
+		http.NotFound(writer, request)
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(writer, request)
+		return
+	}
+	http.ServeFile(writer, request, target)
 }
 func (a *app) getClient(provider string) providerClient {
 	provider = normalizeProvider(provider)
@@ -337,8 +389,24 @@ func tree(conversations []grok.ConversationSummary) []project {
 }
 func trustedOrigin(request *http.Request) bool {
 	origin := request.Header.Get("Origin")
-	return origin == "" || strings.HasPrefix(origin, "chrome-extension://") || origin == "http://"+request.Host
+	if origin == "" || origin == "http://"+request.Host {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	return err == nil && parsed.Scheme == "chrome-extension" && validExtensionID(parsed.Host) && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
 }
+func validExtensionID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, character := range id {
+		if character < 'a' || character > 'p' {
+			return false
+		}
+	}
+	return true
+}
+
 func isLoopback(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
