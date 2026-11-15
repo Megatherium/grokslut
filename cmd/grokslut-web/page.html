@@ -44,16 +44,22 @@
           <label>Source <select id="provider"><option value="grok">Grok</option><option value="gemini">Gemini</option></select></label>
           <input id="filter" type="search" placeholder="Filter conversations or projects…" aria-label="Filter conversations">
           <button class="alt" id="refresh">Refresh</button>
+          <button class="alt" id="select-all" type="button" disabled>Select all</button>
+          <button class="alt" id="select-filtered" type="button" disabled>Select filtered</button>
           <span id="conversation-loading" class="muted hidden" role="status"><span class="spinner" aria-hidden="true"></span> Loading titles…</span>
           <span id="filter-count" class="muted"></span>
         </div>
         <div id="export" class="hidden">
           <div class="export-row">
             <span id="selected"></span>
-            <button data-format="markdown">Markdown + media</button>
-            <button data-format="json">JSON</button>
-            <button data-format="raw-json">Raw JSON</button>
-            <button data-format="zip">ZIP bundle</button>
+            <button class="alt" id="clear-selection" type="button">Clear</button>
+            <label>Format <select id="format">
+              <option value="markdown">Markdown + media</option>
+              <option value="json">JSON</option>
+              <option value="raw-json">Raw JSON</option>
+              <option value="zip">ZIP bundle</option>
+            </select></label>
+            <button id="download-now" type="button">Download now</button>
           </div>
           <div id="progress" class="hidden">
             <p id="progress-label" class="muted">Preparing export…</p>
@@ -83,6 +89,7 @@
       function conversationRow(conversation, projectTitle) {
         const row = document.createElement("div");
         row.className = "chat";
+        row.dataset.id = conversation.id;
         row.dataset.search = [conversation.title, conversation.preview, conversation.id, projectTitle].filter(Boolean).join(" ").toLocaleLowerCase();
         const box = document.createElement("input");
         box.type = "checkbox";
@@ -116,7 +123,25 @@
           branch.classList.toggle("hidden", branchShown === 0);
           if (term && branchShown) branch.open = true;
         });
+        $("#select-all").disabled = total === 0;
+        $("#select-filtered").disabled = shown === 0;
         $("#filter-count").textContent = term ? shown + " of " + total : total + " conversations";
+      }
+      function selectRows(onlyVisible) {
+        document.querySelectorAll("#tree .chat").forEach((row) => {
+          if (onlyVisible && row.classList.contains("hidden")) return;
+          const id = row.dataset.id;
+          const box = row.querySelector('input[type="checkbox"]');
+          if (!id || !box) return;
+          box.checked = true;
+          selected.add(id);
+        });
+        updateSelection();
+      }
+      function clearSelection() {
+        selected.clear();
+        document.querySelectorAll('#tree .chat input[type="checkbox"]').forEach((box) => { box.checked = false; });
+        updateSelection();
       }
       async function loadConversations({ refresh = false } = {}) {
         const loadID = ++conversationLoad;
@@ -124,6 +149,8 @@
         tree.replaceChildren();
         $("#filter-count").textContent = "";
         $("#refresh").disabled = true;
+        $("#select-all").disabled = true;
+        $("#select-filtered").disabled = true;
         const loadingTimer = setTimeout(() => {
           if (loadID === conversationLoad) $("#conversation-loading").classList.remove("hidden");
         }, 1000);
@@ -208,27 +235,37 @@
         } catch (error) { alert(error.message); }
       });
       $("#refresh").addEventListener("click", () => loadConversations({ refresh: true }).catch((error) => alert(error.message)));
-      document.querySelectorAll("[data-format]").forEach((button) => button.addEventListener("click", async () => {
-        const buttons = [...document.querySelectorAll("[data-format]")];
+      $("#select-all").addEventListener("click", () => selectRows(false));
+      $("#select-filtered").addEventListener("click", () => selectRows(true));
+      $("#clear-selection").addEventListener("click", clearSelection);
+      $("#download-now").addEventListener("click", async () => {
+        const button = $("#download-now");
+        const format = $("#format");
         try {
-          buttons.forEach((item) => item.disabled = true);
+          button.disabled = true;
+          format.disabled = true;
           $("#result").replaceChildren();
           $("#progress").classList.remove("hidden");
           $("#progress-label").textContent = "Preparing export…";
           $("#export-progress").removeAttribute("value");
-          const result = await exportSelected(button.dataset.format);
+          const result = await exportSelected(format.value);
           const output = $("#result"); output.replaceChildren();
           for (const path of result.paths) {
             const link = document.createElement("a");
             link.href = "/files/" + path.split("/").map(encodeURIComponent).join("/");
+            link.download = path.split("/").pop() || "";
             link.textContent = "Download " + path; link.style.display = "block"; output.append(link);
           }
           for (const warning of result.warnings || []) { const line = document.createElement("p"); line.className = "warning"; line.textContent = warning; output.append(line); }
           $("#progress-label").textContent = "Export complete.";
           $("#export-progress").value = $("#export-progress").max;
+          if (result.paths.length === 1) output.querySelector("a")?.click();
         } catch (error) { alert(error.message); }
-        finally { buttons.forEach((item) => item.disabled = false); }
-      }));
+        finally {
+          button.disabled = false;
+          format.disabled = false;
+        }
+      });
       loadStatus().catch((error) => { $("#status").textContent = error.message; });
     </script>
   </body>

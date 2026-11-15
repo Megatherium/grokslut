@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Megatherium/grokslut/grok"
@@ -150,5 +151,32 @@ func TestExportEndpointWritesAndRelativizesResult(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(exportDir, filepath.FromSlash(result.Paths[0]))); err != nil {
 		t.Fatalf("exported file unavailable: %v", err)
+	}
+}
+
+func TestIndexIncludesSelectionAndFormatSelectorControls(t *testing.T) {
+	a := &app{}
+	response := httptest.NewRecorder()
+	a.index(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("index status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, want := range []string{
+		`id="select-all"`,
+		`id="select-filtered"`,
+		`id="format"`,
+		`<option value="markdown">`,
+		`<option value="json">`,
+		`<option value="raw-json">`,
+		`<option value="zip">`,
+		`id="download-now"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("index page missing %s", want)
+		}
+	}
+	if strings.Contains(body, "data-format=") {
+		t.Fatal("index page still contains multi-button data-format controls")
 	}
 }
