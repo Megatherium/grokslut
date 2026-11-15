@@ -4,22 +4,58 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>grokslut session bridge</title>
   <style>
-    body { width: 300px; margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: #15171d; color: #f4f4f6; }
-    h1 { margin: 0 0 8px; font-size: 18px; }
-    p { line-height: 1.4; }
-    button { width: 100%; margin-top: 8px; padding: 9px; border: 0; border-radius: 6px; background: #7357c7; color: white; font: inherit; cursor: pointer; }
+    body { width: 340px; margin: 0; padding: 14px 16px; font: 13px system-ui, sans-serif; background: #15171d; color: #f4f4f6; }
+    h1 { margin: 0 0 6px; font-size: 17px; }
+    h2 { margin: 14px 0 6px; font-size: 14px; border-top: 1px solid #2a2d37; padding-top: 10px; }
+    p { line-height: 1.35; margin: 6px 0; }
+    button { width: 100%; margin-top: 6px; padding: 8px 10px; border: 0; border-radius: 6px; background: #7357c7; color: white; font: inherit; cursor: pointer; }
     button.secondary { background: #343741; }
-    #status { min-height: 38px; color: #c8cad1; }
+    button.danger { background: #6b2b34; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    input[type="text"] { flex: 1; min-width: 0; padding: 7px 8px; border: 1px solid #3c404d; border-radius: 6px; background: #101218; color: #f4f4f6; font: inherit; }
+    label { display: block; color: #c8cad1; font-size: 12px; margin-bottom: 4px; }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .row button { width: auto; margin-top: 0; white-space: nowrap; }
+    .actions { display: flex; gap: 6px; margin-top: 6px; }
+    .actions button { flex: 1; margin-top: 0; }
+    .muted { color: #9fa3b2; font-size: 12px; }
+    #status { min-height: 20px; color: #c8cad1; }
+    #queue-list { max-height: 190px; overflow-y: auto; margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+    .q-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; background: #1e212b; border: 1px solid #2d3140; }
+    .q-item.active { border-color: #7357c7; }
+    .q-item.failed { border-color: #7c353f; }
+    .q-meta { flex: 1; min-width: 0; }
+    .q-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+    .q-sub { font-size: 11px; color: #9fa3b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .q-item.failed .q-sub { color: #f29ca6; }
+    .q-del { width: auto; margin-top: 0; padding: 3px 7px; font-size: 12px; background: #343741; }
   </style>
   <body>
     <h1>grokslut</h1>
-    <p>Sync this Chrome profile's Grok or Gemini session to the exporter running on your computer.</p>
+    <p>Sync this browser profile's Grok or Gemini session to the local exporter.</p>
     <button id="sync-grok">Sync Grok session</button>
     <button id="sync-gemini">Sync Gemini session</button>
-    <button id="grok" class="secondary">Open Grok</button>
-    <button id="gemini" class="secondary">Open Gemini</button>
-    <button id="app" class="secondary">Open exporter</button>
+    <div class="actions">
+      <button id="grok" class="secondary">Open Grok</button>
+      <button id="gemini" class="secondary">Open Gemini</button>
+      <button id="app" class="secondary">Exporter</button>
+    </div>
     <p id="status" role="status"></p>
+
+    <h2>Download manager</h2>
+    <label for="download-dir">Download directory (path or subfolder)</label>
+    <div class="row">
+      <input id="download-dir" type="text" placeholder="~/Downloads/grokslut (blank = exports/)">
+      <button id="save-dir" class="secondary" type="button">Save</button>
+    </div>
+    <p id="dir-status" class="muted"></p>
+    <button id="queue-downloads" type="button">Queue downloads</button>
+    <div class="actions">
+      <button id="toggle-pause" class="secondary" type="button" disabled>Pause</button>
+      <button id="clear-queue" class="danger" type="button" disabled>Clear queue</button>
+    </div>
+    <p id="queue-summary" class="muted"></p>
+    <div id="queue-list"></div>
     <script src="popup.js"></script>
   </body>
 </html>

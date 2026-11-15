@@ -124,6 +124,9 @@ func (e Exporter) getMedia(ctx context.Context, assetURL string) (*http.Response
 
 func (e Exporter) writeZIP(ctx context.Context, threads []grok.Thread, outDir string, progress ProgressFunc) (Result, error) {
 	base := "grokslut-export-" + time.Now().UTC().Format("20060102T150405Z")
+	if len(threads) == 1 {
+		base = SafeName(threads[0].Conversation.Title)
+	}
 	file, name, err := createUniqueFile(outDir, base, ".zip")
 	if err != nil {
 		return Result{}, err
@@ -545,7 +548,7 @@ func SafeName(value string) string {
 	value = strings.ReplaceAll(value, "..", " ")
 	var builder strings.Builder
 	for _, char := range strings.TrimSpace(value) {
-		if unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("._ -", char) {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) || strings.ContainsRune("._-", char) {
 			builder.WriteRune(char)
 		} else {
 			builder.WriteRune('_')

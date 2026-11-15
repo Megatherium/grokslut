@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Megatherium/grokslut/auth"
@@ -34,6 +35,9 @@ type Client struct {
 	HTTP    *http.Client
 	Headers http.Header
 	Retries int
+
+	mu     sync.Mutex
+	titles map[string]ConversationSummary
 }
 
 func NewClient(session auth.Session, baseURL string) (*Client, error) {
@@ -70,7 +74,7 @@ func NewClient(session auth.Session, baseURL string) (*Client, error) {
 	if err := session.Apply(httpClient, base.String()); err != nil {
 		return nil, err
 	}
-	return &Client{BaseURL: base, HTTP: httpClient, Headers: headers, Retries: 3}, nil
+	return &Client{BaseURL: base, HTTP: httpClient, Headers: headers, Retries: 3, titles: map[string]ConversationSummary{}}, nil
 }
 
 func (c *Client) Verify() error { return c.VerifyContext(context.Background()) }
@@ -99,7 +103,21 @@ func (c *Client) ListConversationsContext(ctx context.Context, pageSize int, cur
 	if err != nil {
 		return ListResult{}, err
 	}
-	return decodeList(raw)
+	result, err := decodeList(raw)
+	if err != nil {
+		return ListResult{}, err
+	}
+	c.mu.Lock()
+	if c.titles == nil {
+		c.titles = map[string]ConversationSummary{}
+	}
+	for _, conversation := range result.Conversations {
+		if conversation.ID != "" {
+			c.titles[conversation.ID] = conversation
+		}
+	}
+	c.mu.Unlock()
+	return result, nil
 }
 
 func (c *Client) ListAllConversations(pageSize int) ([]ConversationSummary, error) {
@@ -157,7 +175,23 @@ func (c *Client) LoadConversationProgressContext(ctx context.Context, id string,
 		return Thread{}, err
 	}
 	responseIDs := unique(collectResponseIDs(nodes))
-	thread := Thread{Conversation: conversationFromNodes(nodes, id), Nodes: nodes}
+	conversation := conversationFromNodes(nodes, id)
+	if conversation.Title == "" || conversation.Title == "Untitled conversation" {
+		c.mu.Lock()
+		cached, ok := c.titles[id]
+		emptyCache := len(c.titles) == 0
+		c.mu.Unlock()
+		if !ok && emptyCache {
+			_, _ = c.ListAllConversationsContext(ctx, 60)
+			c.mu.Lock()
+			cached, ok = c.titles[id]
+			c.mu.Unlock()
+		}
+		if ok {
+			conversation = mergeConversationSummary(conversation, cached)
+		}
+	}
+	thread := Thread{Conversation: conversation, Nodes: nodes}
 	loaded := map[string]bool{}
 	attempted := map[string]bool{}
 	total := len(responseIDs)
@@ -429,6 +463,31 @@ func conversationFromNodes(raw []byte, id string) ConversationSummary {
 		result.ID = id
 	}
 	return result
+}
+
+func mergeConversationSummary(primary, cached ConversationSummary) ConversationSummary {
+	if (primary.Title == "" || primary.Title == "Untitled conversation") && cached.Title != "" {
+		primary.Title = cached.Title
+	}
+	if primary.Provider == "" {
+		primary.Provider = cached.Provider
+	}
+	if primary.CreatedAt == "" {
+		primary.CreatedAt = cached.CreatedAt
+	}
+	if primary.UpdatedAt == "" {
+		primary.UpdatedAt = cached.UpdatedAt
+	}
+	if primary.Preview == "" {
+		primary.Preview = cached.Preview
+	}
+	if primary.ProjectID == "" {
+		primary.ProjectID = cached.ProjectID
+	}
+	if primary.ProjectTitle == "" {
+		primary.ProjectTitle = cached.ProjectTitle
+	}
+	return primary
 }
 func firstArray(object map[string]json.RawMessage, keys ...string) []json.RawMessage {
 	for _, key := range keys {

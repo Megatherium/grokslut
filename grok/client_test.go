@@ -261,6 +261,42 @@ func TestContextCancelsRetryBackoff(t *testing.T) {
 	}
 }
 
+func TestLoadConversationUsesCachedListTitleWhenNodesOmitTitle(t *testing.T) {
+	for _, nodeTitle := range []string{"", "Untitled conversation"} {
+		t.Run(nodeTitle, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.URL.Path == "/rest/app-chat/conversations":
+					writeJSON(writer, map[string]any{"conversations": []any{map[string]string{"id": "c1", "title": "My Grok Chat"}}})
+				case strings.Contains(request.URL.Path, "/response-node"):
+					conv := map[string]string{"id": "c1"}
+					if nodeTitle != "" {
+						conv["title"] = nodeTitle
+					}
+					writeJSON(writer, map[string]any{"conversation": conv, "responseNodes": []any{map[string]string{"responseId": "r1"}}})
+				case strings.Contains(request.URL.Path, "/load-responses"):
+					writeJSON(writer, map[string]any{"responses": []any{map[string]string{"responseId": "r1", "message": "hi"}}})
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
+
+			client := fixtureClient(t, server.URL)
+			if _, err := client.ListAllConversations(60); err != nil {
+				t.Fatal(err)
+			}
+			thread, err := client.LoadConversation("c1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if thread.Conversation.Title != "My Grok Chat" {
+				t.Fatalf("got title %q, want %q", thread.Conversation.Title, "My Grok Chat")
+			}
+		})
+	}
+}
+
 func fixtureClient(t *testing.T, rawURL string) *grok.Client {
 	t.Helper()
 	parsed, err := url.Parse(rawURL)

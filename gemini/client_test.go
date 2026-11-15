@@ -62,6 +62,9 @@ func TestClientListsAndFullyPaginatesHydratedConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if thread.Conversation.Title != "A Gemini chat" {
+		t.Fatalf("got conversation title %q, want %q", thread.Conversation.Title, "A Gemini chat")
+	}
 	if loadCalls != 2 || len(thread.Responses) != 4 {
 		t.Fatalf("loads=%d responses=%d", loadCalls, len(thread.Responses))
 	}
@@ -167,6 +170,43 @@ func TestListAllConversationsExhaustsPinnedAndRegularCursors(t *testing.T) {
 		if !containsConversation(conversations, id) {
 			t.Fatalf("missing %s from %#v", id, conversations)
 		}
+	}
+}
+
+func TestLoadConversationBackfillsTitleFromListWhenCacheEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/app":
+			_, _ = fmt.Fprint(writer, `<script>window.WIZ_global_data={"SNlM0e":"csrf","cfb2h":"build","FdrFJe":"sid"};</script>`)
+		case "/_/BardChatUi/data/batchexecute":
+			if err := request.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			rpc := request.URL.Query().Get("rpcids")
+			switch rpc {
+			case "MaZiqc":
+				if strings.Contains(request.Form.Get("f.req"), `[1,null,1]`) {
+					batchResponse(writer, rpc, []any{nil, nil, []any{}})
+					return
+				}
+				batchResponse(writer, rpc, listPayload("", "c_one", "Backfilled Gemini Title"))
+			case "hNvQHb":
+				batchResponse(writer, rpc, []any{[]any{turn("c_one", "r1", "", "Hi", "rc1", "Hello", 1700000001)}, nil, nil, []any{}})
+			default:
+				http.NotFound(writer, request)
+			}
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	thread, err := fixtureClient(t, server.URL).LoadConversation("c_one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread.Conversation.Title != "Backfilled Gemini Title" {
+		t.Fatalf("got title %q, want %q", thread.Conversation.Title, "Backfilled Gemini Title")
 	}
 }
 

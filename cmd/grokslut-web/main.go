@@ -56,6 +56,7 @@ type exportRequest struct {
 	Provider string          `json:"provider"`
 	IDs      []string        `json:"ids"`
 	Format   exporter.Format `json:"format"`
+	OutDir   string          `json:"outDir,omitempty"`
 }
 
 func main() {
@@ -245,12 +246,17 @@ func (a *app) export(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusUnauthorized, grok.ErrAuthExpired)
 		return
 	}
-	result, err := (exporter.Exporter{Client: client}).ExportContext(request.Context(), input.IDs, input.Format, a.exportDir, nil)
+	targetDir, err := a.resolveExportDir(input.OutDir)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	result, err := (exporter.Exporter{Client: client}).ExportContext(request.Context(), input.IDs, input.Format, targetDir, nil)
 	if err != nil {
 		writeClientError(writer, err)
 		return
 	}
-	if err := a.relativize(&result); err != nil {
+	if err := relativizeTo(targetDir, &result); err != nil {
 		writeError(writer, http.StatusInternalServerError, err)
 		return
 	}
@@ -301,9 +307,47 @@ func (a *app) exportStream(writer http.ResponseWriter, request *http.Request) {
 	send(map[string]any{"type": "result", "result": result})
 }
 
+// resolveExportDir resolves a user-supplied export destination. Because /api/export
+// is loopback-only and gated by trustedOrigin, absolute and ~-expanded paths are
+// intentionally allowed (except "/") so background queue jobs can write directly to
+// user directories like ~/Downloads without browser Save-As prompts.
+func (a *app) resolveExportDir(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return a.exportDir, nil
+	}
+	if trimmed == "~" || strings.HasPrefix(trimmed, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		if trimmed == "~" {
+			trimmed = home
+		} else {
+			trimmed = filepath.Join(home, filepath.FromSlash(strings.TrimPrefix(trimmed, "~/")))
+		}
+	}
+	if filepath.IsAbs(trimmed) {
+		cleaned := filepath.Clean(trimmed)
+		if cleaned == string(filepath.Separator) {
+			return "", errors.New("refusing root directory as download dir")
+		}
+		return cleaned, nil
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(trimmed))
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", errors.New("relative download dir cannot escape export root")
+	}
+	return filepath.Join(a.exportDir, cleaned), nil
+}
+
 func (a *app) relativize(result *exporter.Result) error {
+	return relativizeTo(a.exportDir, result)
+}
+
+func relativizeTo(baseDir string, result *exporter.Result) error {
 	for index, item := range result.Paths {
-		relative, err := filepath.Rel(a.exportDir, item)
+		relative, err := filepath.Rel(baseDir, item)
 		if err != nil || strings.HasPrefix(relative, "..") {
 			return errors.New("invalid export path")
 		}

@@ -187,9 +187,18 @@ func (c *Client) LoadConversationProgressContext(ctx context.Context, id string,
 	}
 	c.mu.Lock()
 	conversation, found := c.titles[id]
+	emptyCache := len(c.titles) == 0
 	c.mu.Unlock()
+	if (!found || conversation.Title == "" || conversation.Title == "Untitled Gemini conversation") && emptyCache {
+		_, _ = c.ListAllConversationsContext(ctx, 100)
+		c.mu.Lock()
+		conversation, found = c.titles[id]
+		c.mu.Unlock()
+	}
 	if !found {
 		conversation = grok.ConversationSummary{Provider: "gemini", ID: id, Title: "Gemini conversation " + id, ProjectID: "gemini", ProjectTitle: "Gemini"}
+	} else if conversation.Title == "" {
+		conversation.Title = "Gemini conversation " + id
 	}
 	thread := grok.Thread{Conversation: conversation}
 	var pages []json.RawMessage

@@ -171,6 +171,7 @@ func TestIndexIncludesSelectionAndFormatSelectorControls(t *testing.T) {
 		`<option value="raw-json">`,
 		`<option value="zip">`,
 		`id="download-now"`,
+		`id="queue-downloads"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("index page missing %s", want)
@@ -178,5 +179,65 @@ func TestIndexIncludesSelectionAndFormatSelectorControls(t *testing.T) {
 	}
 	if strings.Contains(body, "data-format=") {
 		t.Fatal("index page still contains multi-button data-format controls")
+	}
+}
+
+func TestExportEndpointWritesToCustomOutDirAndRejectsEscape(t *testing.T) {
+	defaultDir := t.TempDir()
+	customDir := t.TempDir()
+	a := &app{clients: map[string]providerClient{"grok": &countingProviderClient{}}, exportDir: defaultDir}
+
+	reqBody, err := json.Marshal(map[string]any{"ids": []string{"one"}, "format": "json", "outDir": customDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	a.export(response, httptest.NewRequest(http.MethodPost, "/api/export", bytes.NewReader(reqBody)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("custom outDir export status %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Paths) != 1 || filepath.IsAbs(result.Paths[0]) {
+		t.Fatalf("unexpected paths: %#v", result.Paths)
+	}
+	if _, err := os.Stat(filepath.Join(customDir, filepath.FromSlash(result.Paths[0]))); err != nil {
+		t.Fatalf("custom outDir file missing: %v", err)
+	}
+
+	bad := httptest.NewRecorder()
+	a.export(bad, httptest.NewRequest(http.MethodPost, "/api/export", bytes.NewBufferString(`{"ids":["one"],"format":"json","outDir":"../escape"}`)))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("escaping relative outDir status = %d, want 400", bad.Code)
+	}
+
+	rootBad := httptest.NewRecorder()
+	a.export(rootBad, httptest.NewRequest(http.MethodPost, "/api/export", bytes.NewBufferString(`{"ids":["one"],"format":"json","outDir":"/"}`)))
+	if rootBad.Code != http.StatusBadRequest {
+		t.Fatalf("root outDir status = %d, want 400", rootBad.Code)
+	}
+
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	tildeResp := httptest.NewRecorder()
+	a.export(tildeResp, httptest.NewRequest(http.MethodPost, "/api/export", bytes.NewBufferString(`{"ids":["one"],"format":"json","outDir":"~/sub"}`)))
+	if tildeResp.Code != http.StatusOK {
+		t.Fatalf("tilde outDir export status %d: %s", tildeResp.Code, tildeResp.Body.String())
+	}
+	var tildeResult struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(tildeResp.Body).Decode(&tildeResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(tildeResult.Paths) != 1 {
+		t.Fatalf("unexpected tilde paths: %#v", tildeResult.Paths)
+	}
+	if _, err := os.Stat(filepath.Join(fakeHome, "sub", filepath.FromSlash(tildeResult.Paths[0]))); err != nil {
+		t.Fatalf("tilde outDir file missing: %v", err)
 	}
 }

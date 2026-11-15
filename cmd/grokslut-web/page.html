@@ -60,6 +60,7 @@
               <option value="zip">ZIP bundle</option>
             </select></label>
             <button id="download-now" type="button">Download now</button>
+            <button class="alt" id="queue-downloads" type="button">Queue downloads</button>
           </div>
           <div id="progress" class="hidden">
             <p id="progress-label" class="muted">Preparing export…</p>
@@ -67,6 +68,7 @@
           </div>
           <div id="result"></div>
         </div>
+        <p id="queue-status" class="muted hidden" role="status"></p>
       </div>
       <div id="tree"></div>
     </section>
@@ -266,6 +268,67 @@
           format.disabled = false;
         }
       });
+      function formatQueueStatus(state) {
+        if (!state) return "";
+        const pending = state.pending?.length || 0;
+        const failed = state.failed?.length || 0;
+        const parts = [];
+        if (state.active) parts.push("1 active");
+        if (pending) parts.push(pending + " queued");
+        if (state.completed) parts.push(state.completed + " done");
+        if (failed) parts.push(failed + " failed");
+        const summary = parts.length ? parts.join(" • ") : "";
+        if (!summary && !state.lastMessage) return "";
+        return summary && state.lastMessage ? summary + " — " + state.lastMessage : (summary || state.lastMessage);
+      }
+      function showQueueStatus(text) {
+        const el = $("#queue-status");
+        el.textContent = text;
+        el.classList.toggle("hidden", !text);
+      }
+      window.addEventListener("message", (event) => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const data = event.data;
+        if (!data || typeof data.type !== "string") return;
+        if (data.type === "grokslut:queue-state") {
+          showQueueStatus(formatQueueStatus(data.state));
+        } else if (data.type === "grokslut:enqueue-result") {
+          showQueueStatus(data.ok ? formatQueueStatus(data.state) : (data.error || "Could not queue downloads."));
+        }
+      });
+      $("#queue-downloads").addEventListener("click", () => {
+        if (document.documentElement.dataset.grokslutExtension !== "1") {
+          showQueueStatus("Extension download bridge not detected. Reload the grokslut extension and refresh this page.");
+          return;
+        }
+        const items = [];
+        document.querySelectorAll("#tree .chat").forEach((row) => {
+          const box = row.querySelector('input[type="checkbox"]');
+          if (!box || !box.checked) return;
+          const id = row.dataset.id;
+          if (!id) return;
+          items.push({ id, title: row.querySelector("label")?.textContent || id });
+        });
+        if (!items.length) {
+          showQueueStatus("Select at least one conversation first.");
+          return;
+        }
+        showQueueStatus("Queueing " + items.length + " chat" + (items.length === 1 ? "" : "s") + "…");
+        window.postMessage({
+          type: "grokslut:enqueue",
+          requestId: String(Date.now()),
+          provider: $("#provider").value,
+          format: $("#format").value,
+          items,
+        }, window.location.origin);
+      });
+      if (document.documentElement.dataset.grokslutExtension === "1") {
+        window.postMessage({ type: "grokslut:get-queue-state" }, window.location.origin);
+      } else {
+        window.addEventListener("grokslut:extension-ready", () => {
+          window.postMessage({ type: "grokslut:get-queue-state" }, window.location.origin);
+        }, { once: true });
+      }
       loadStatus().catch((error) => { $("#status").textContent = error.message; });
     </script>
   </body>

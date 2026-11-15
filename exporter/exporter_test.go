@@ -63,7 +63,7 @@ func TestExportZIPIncludesMarkdownJSONAndMedia(t *testing.T) {
 }
 
 func TestSafeNameCannotEscapeDestination(t *testing.T) {
-	if got := exporter.SafeName(`../../not allowed?`); got != "not allowed_" {
+	if got := exporter.SafeName(`../../not allowed?`); got != "not_allowed_" {
 		t.Fatalf("unexpected safe name %q", got)
 	}
 	if filepath.IsAbs(exporter.SafeName(`/escape`)) {
@@ -198,10 +198,24 @@ func TestZIPDeduplicatesSameTitleDirectories(t *testing.T) {
 		}
 		seen[file.Name] = true
 	}
-	for _, name := range []string{"Same title/Same title.json", "Same title-2/Same title.json"} {
+	for _, name := range []string{"Same_title/Same_title.json", "Same_title-2/Same_title.json"} {
 		if !seen[name] {
 			t.Fatalf("missing %q in archive entries %#v", name, seen)
 		}
+	}
+}
+
+func TestSingleThreadZIPUsesChatTitleWithUnderscores(t *testing.T) {
+	client := staticHistoryClient{thread: grok.Thread{
+		Conversation: grok.ConversationSummary{ID: "one", Title: "My Cool Chat"},
+	}}
+	outDir := t.TempDir()
+	result, err := (exporter.Exporter{Client: client}).Export([]string{"one"}, exporter.ZIP, outDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Paths) != 1 || filepath.Base(result.Paths[0]) != "My_Cool_Chat.zip" {
+		t.Fatalf("unexpected ZIP path: %#v", result.Paths)
 	}
 }
 
